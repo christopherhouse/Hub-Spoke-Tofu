@@ -63,6 +63,7 @@ Bicep targets a scope per module, so subscriptions are data rather than configur
 - A Bastion of any SKU other than Developer requires a dedicated subnet named exactly `AzureBastionSubnet`, sized /26 or larger, plus a Standard SKU public IP. The AVM bastion module creates the public IP from `publicIPAddressObject`.
 - Applying an NSG to `AzureBastionSubnet` is optional, but if one is present it must carry every rule from the Azure Bastion NSG guidance. A missing rule breaks connectivity and blocks platform updates.
 - Jump box and other target subnets allow RDP and SSH only from the `AzureBastionSubnet` prefix, never from the internet.
+- An NSG security rule `description` must be 140 characters or fewer. Azure rejects longer ones at preflight with `SecurityRuleDescriptionTooLong`, which `az bicep build` does not catch.
 - Subnets delegated to `Microsoft.App/environments` for Azure Container Apps must be /27 or larger and are dedicated to that environment. The prefix cannot be changed once an environment exists in it, so size for growth.
 - Keep future firewall, gateway, route-table, and DNS resolver features optional and composable.
 

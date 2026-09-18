@@ -331,7 +331,7 @@ module runnersNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
       {
         name: 'AllowAzureContainerRegistryOutbound'
         properties: {
-          description: 'Pulling runner images from Azure Container Registry over a public endpoint. Not required once the registry is reached through a private endpoint.'
+          description: 'Pull runner images from Azure Container Registry. Not required once the registry is reached through a private endpoint.'
           access: 'Allow'
           direction: 'Outbound'
           priority: 150
