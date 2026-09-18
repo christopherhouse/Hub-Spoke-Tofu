@@ -36,6 +36,35 @@ type hubBastionType = {
 }
 
 @export()
+@description('Optional. NAT gateway for a hub. It is attached to the jump box subnet so that outbound traffic leaves through a known, static public IP rather than an ephemeral default-outbound address. Azure requires a Standard SKU static public IP for a NAT gateway.')
+type hubNatGatewayType = {
+  @description('Optional. Deploy the NAT gateway. Defaults to `true`.')
+  enabled: bool?
+
+  @description('Optional. Name of the NAT gateway. Defaults to `ng-<hub name>`.')
+  @minLength(1)
+  @maxLength(80)
+  name: string?
+
+  @description('Optional. NAT gateway SKU. Defaults to `Standard`.')
+  skuName: ('Standard' | 'StandardV2')?
+
+  @description('Optional. Availability zone for the NAT gateway and its public IP. A NAT gateway is either zonal or non-zonal; it cannot be zone-redundant. Defaults to `-1`, meaning no zone.')
+  availabilityZone: (-1 | 1 | 2 | 3)?
+
+  @description('Optional. Idle timeout of the outbound flows, in minutes. Defaults to `4`.')
+  @minValue(4)
+  @maxValue(120)
+  idleTimeoutInMinutes: int?
+
+  @description('Optional. Resource IDs of existing public IP addresses to attach. Supply these to keep an already allow-listed address. When omitted, one Standard static public IP is created.')
+  publicIpResourceIds: string[]?
+
+  @description('Optional. Resource IDs of existing public IP prefixes to attach. Use a prefix when a contiguous, allow-listable range of outbound addresses is required.')
+  publicIpPrefixResourceIds: string[]?
+}
+
+@export()
 @description('Optional. A plain hub subnet defined by name and address prefix.')
 type hubSubnetType = {
   @description('Optional. Create the subnet. Defaults to `true`.')
@@ -82,6 +111,9 @@ type hubType = {
 
   @description('Optional. Subnet for management jump boxes. Omit to deploy the hub without one.')
   jumpboxSubnet: hubSubnetType?
+
+  @description('Optional. NAT gateway attached to the jump box subnet. Omit to deploy the hub without one, in which case jump boxes fall back to Azure default outbound access.')
+  natGateway: hubNatGatewayType?
 
   @description('Optional. Subnet for the Azure Container Apps environment that hosts self-hosted GitHub Actions runners. Delegated to `Microsoft.App/environments`. A workload profile environment requires /27 or larger, and the prefix cannot be changed once an environment exists in it.')
   runnersSubnet: hubSubnetType?
