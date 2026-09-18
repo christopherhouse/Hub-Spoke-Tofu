@@ -53,6 +53,22 @@ function Invoke-NativeCommand {
     }
 }
 
+function Write-Utf8NoBom {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Content
+    )
+
+    # Windows PowerShell 5.1 `Set-Content -Encoding UTF8` emits a BOM, which the
+    # OpenTofu JSON and HCL parsers reject. Write UTF-8 without a BOM instead.
+    $encoding = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $encoding)
+}
+
 foreach ($command in @('az', 'tofu')) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Required command '$command' was not found on PATH."
@@ -104,7 +120,7 @@ $variables = [ordered]@{
     state_principal_object_ids = @($PrincipalObjectId)
 }
 
-$variables | ConvertTo-Json -Depth 4 | Set-Content -Path $variablesPath -Encoding UTF8
+Write-Utf8NoBom -Path $variablesPath -Content ($variables | ConvertTo-Json -Depth 4)
 
 Push-Location $scriptRoot
 try {
@@ -128,7 +144,7 @@ use_azuread_auth     = true
 use_oidc             = true
 "@
 
-    Set-Content -Path $backendPath -Value $backend -Encoding UTF8
+    Write-Utf8NoBom -Path $backendPath -Content $backend
 
     Write-Host ''
     Write-Host "State storage bootstrap completed."
