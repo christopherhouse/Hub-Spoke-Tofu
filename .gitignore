@@ -16,6 +16,11 @@ crash.log
 crash.*.log
 
 # Local variable and override files
+# Generated variable files contain subscription and principal IDs.
+# Keep the committed examples.
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
 *.auto.tfvars
 *.auto.tfvars.json
 *.tfvars.local

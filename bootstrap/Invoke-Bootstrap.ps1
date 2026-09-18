@@ -16,6 +16,8 @@ param(
     [Parameter(Mandatory = $true, ParameterSetName = 'ExistingResourceGroup')]
     [switch]$UseExistingResourceGroup,
 
+    # Constrained to Azure's resource group charset, which also keeps generated HCL safe.
+    [ValidatePattern('^[a-zA-Z0-9_().-]{1,89}[a-zA-Z0-9_()-]$')]
     [string]$ResourceGroupName = 'rg-tofu-state',
 
     [ValidateScript({
@@ -51,6 +53,50 @@ function Invoke-NativeCommand {
     if ($LASTEXITCODE -ne 0) {
         throw "$Name exited with code $LASTEXITCODE."
     }
+}
+
+function ConvertTo-HclValue {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value) {
+        return 'null'
+    }
+
+    if ($Value -is [bool]) {
+        return $Value.ToString().ToLowerInvariant()
+    }
+
+    if ($Value -is [array]) {
+        if ($Value.Count -eq 0) {
+            return '[]'
+        }
+
+        $items = $Value | ForEach-Object { ConvertTo-HclValue -Value $_ }
+        return '[' + ($items -join ', ') + ']'
+    }
+
+    # Every string input is validated by the parameter block, but escape defensively
+    # so a value can never break out of the quoted HCL string.
+    $escaped = ([string]$Value).Replace('\', '\\').Replace('"', '\"')
+    return '"' + $escaped + '"'
+}
+
+function ConvertTo-HclVarsFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [System.Collections.IDictionary]$Variables
+    )
+
+    $width = ($Variables.Keys | Measure-Object -Property Length -Maximum).Maximum
+    $lines = foreach ($key in $Variables.Keys) {
+        '{0} = {1}' -f $key.PadRight($width), (ConvertTo-HclValue -Value $Variables[$key])
+    }
+
+    return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
 
 function Write-Utf8NoBom {
@@ -105,7 +151,7 @@ if (-not $PrincipalObjectId -or $PrincipalObjectId.Count -eq 0) {
 }
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$variablesPath = Join-Path $scriptRoot 'bootstrap.auto.tfvars.json'
+$variablesPath = Join-Path $scriptRoot 'bootstrap.tfvars'
 $planPath = Join-Path $scriptRoot 'bootstrap.tfplan'
 $backendPath = Join-Path $scriptRoot 'backend.generated.hcl'
 
@@ -120,14 +166,14 @@ $variables = [ordered]@{
     state_principal_object_ids = @($PrincipalObjectId)
 }
 
-Write-Utf8NoBom -Path $variablesPath -Content ($variables | ConvertTo-Json -Depth 4)
+Write-Utf8NoBom -Path $variablesPath -Content (ConvertTo-HclVarsFile -Variables $variables)
 
 Push-Location $scriptRoot
 try {
     Invoke-NativeCommand -Name 'tofu' -Arguments @('fmt', '-check', '-recursive')
     Invoke-NativeCommand -Name 'tofu' -Arguments @('init')
     Invoke-NativeCommand -Name 'tofu' -Arguments @('validate')
-    Invoke-NativeCommand -Name 'tofu' -Arguments @('plan', '-out', $planPath)
+    Invoke-NativeCommand -Name 'tofu' -Arguments @('plan', '-var-file', 'bootstrap.tfvars', '-out', $planPath)
 
     if ($AutoApprove) {
         Invoke-NativeCommand -Name 'tofu' -Arguments @('apply', '-auto-approve', $planPath)

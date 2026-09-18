@@ -64,10 +64,16 @@ In that mode the configuration reads the existing group and inherits its locatio
 
 After a successful apply, the script writes ignored local files:
 
-- `bootstrap.auto.tfvars.json`
+- `bootstrap.tfvars`
 - `bootstrap.tfplan`
 - `backend.generated.hcl`
 - `terraform.tfstate`
+
+`bootstrap.tfvars` is passed explicitly with `-var-file` rather than auto-loaded, so a stale or unrelated variables file can never silently apply to this state. To re-run OpenTofu by hand, pass it yourself:
+
+```powershell
+tofu plan -var-file=bootstrap.tfvars
+```
 
 Use `backend.generated.hcl` with the future workload root:
 
