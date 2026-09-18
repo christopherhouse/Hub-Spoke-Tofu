@@ -51,6 +51,31 @@ bicepconfig.json     Bicep linter configuration
 
 Requires Azure CLI with the Bicep extension.
 
+### Subscription prerequisite: public IP allocation
+
+Bastion needs a public IP. Some subscriptions cannot allocate one until the
+`AllowBringYourOwnPublicIpAddress` feature is registered, and fail with:
+
+```
+SubscriptionNotRegisteredForFeature - Subscription ... is not registered for feature
+Microsoft.Network/AllowBringYourOwnPublicIpAddress
+```
+
+Despite the name, this gates *all* public IP creation on such a subscription, not just
+bring-your-own ranges. It is a subscription capability, not a policy or a template defect —
+a bare `az network public-ip create` fails identically. Register it once per subscription:
+
+```powershell
+az feature register --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress
+az feature show --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress --query properties.state
+az provider register --namespace Microsoft.Network
+```
+
+The provider re-registration is required to propagate the change. `what-if` does **not**
+surface this, because the check happens when the resource is actually created.
+
+### Commands
+
 ```powershell
 az bicep build --file infra/main.bicep
 az bicep build-params --file infra/main.bicepparam
