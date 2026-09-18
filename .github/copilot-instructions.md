@@ -72,6 +72,14 @@ Bicep targets a scope per module, so subscriptions are data rather than configur
 - Do not create separate zones for Azure Container Registry data endpoints or App Service SCM. Both are records inside the parent zone when Azure Private DNS is used.
 - Azure Managed Redis (`privatelink.redis.azure.net`) is a different service and zone from Azure Cache for Redis (`privatelink.redis.cache.windows.net`).
 
+## Source control
+
+- All work happens on feature branches. Do not commit directly to `main`.
+- Branch from the latest `main` and use a short descriptive name, for example `feat/hub-vnet`, `fix/dns-zone-links`, or `chore/bump-avm-versions`.
+- Land changes through a pull request. `main` is the deployment branch, so anything merged there is expected to deploy.
+- Keep a branch scoped to one logical change so its `what-if` output is reviewable.
+- Never rewrite published history on `main`.
+
 ## GitHub Actions
 
 - Pull requests run `az bicep build`, parameter build, and `az deployment sub what-if`.

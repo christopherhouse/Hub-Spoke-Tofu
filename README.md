@@ -58,6 +58,12 @@ az deployment sub create `
   --parameters infra/main.bicepparam
 ```
 
+## Contributing
+
+All work happens on feature branches; `main` is the deployment branch and takes no direct
+commits. Branch from `main`, open a pull request, review the `what-if` output the workflow
+posts, then merge to deploy.
+
 ## CI/CD
 
 `.github/workflows/deploy.yml` builds and runs `what-if` on pull requests, then deploys on
