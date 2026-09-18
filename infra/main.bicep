@@ -64,6 +64,7 @@ module hubNetworks 'modules/hub.bicep' = [
       addressPrefixes: hub.addressPrefixes
       bastion: hub.?bastion
       jumpboxSubnet: hub.?jumpboxSubnet
+      natGateway: hub.?natGateway
       runnersSubnet: hub.?runnersSubnet
       tags: hub.?tags ?? tags
       enableTelemetry: enableTelemetry
@@ -132,6 +133,7 @@ output hubs array = [
     bastionResourceId: hubNetworks[index].outputs.bastionResourceId
     bastionSubnetResourceId: hubNetworks[index].outputs.bastionSubnetResourceId
     jumpboxSubnetResourceId: hubNetworks[index].outputs.jumpboxSubnetResourceId
+    natGatewayResourceId: hubNetworks[index].outputs.natGatewayResourceId
     runnersSubnetResourceId: hubNetworks[index].outputs.runnersSubnetResourceId
   }
 ]

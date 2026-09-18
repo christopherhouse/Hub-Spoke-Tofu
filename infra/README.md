@@ -8,7 +8,7 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `main.bicepparam` | Parameter values for the current deployment. |
 | `types.bicep` | Shared user-defined types (`hubType` and friends), surfaced with `@export()`. |
 | `zones.bicep` | Curated Private Link DNS zone catalog, surfaced with `@export()`. |
-| `modules/hub.bicep` | Hub virtual network, subnets, NSGs and Azure Bastion. Resource-group scope. |
+| `modules/hub.bicep` | Hub virtual network, subnets, NSGs, Azure Bastion and the jump box NAT gateway. Resource-group scope. |
 
 ## Modules
 
@@ -49,6 +49,8 @@ Each hub produces:
 - `vnet-<hub name>` with the subnets below,
 - an NSG per subnet,
 - an Azure Bastion **Standard** host and its Standard SKU public IP,
+- an optional NAT gateway and its Standard SKU static public IP, attached to the jump box
+  subnet,
 - a link from the hub VNet to every Private DNS zone, with registration disabled.
 
 ### Address plan
@@ -58,7 +60,7 @@ Hub 1 is `10.0.0.0/19` (10.0.0.0 – 10.0.31.255).
 | Subnet | Prefix | Notes |
 |---|---|---|
 | `AzureBastionSubnet` | `10.0.0.0/26` | Name fixed by Azure. /26 is the minimum for Bastion resources created after 2 November 2021. |
-| `snet-jumpbox` | `10.0.0.64/27` | |
+| `snet-jumpbox` | `10.0.0.64/27` | NAT gateway attached for outbound SNAT. |
 | *(free)* | `10.0.0.96/27` | Left open so the runners subnet lands on a /26 boundary. |
 | `snet-runners` | `10.0.0.128/26` | Delegated to `Microsoft.App/environments`. |
 | *(reserved)* | `10.0.0.192` – `10.0.31.255` | Firewall, gateway, DNS resolver, shared services. |
@@ -79,6 +81,25 @@ present or Bastion stops receiving platform updates and connectivity breaks.
 
 The jump box NSG allows RDP and SSH inbound from the `AzureBastionSubnet` prefix only. No
 management port is exposed to the internet.
+
+### NAT gateway
+
+`natGateway` on a hub attaches a NAT gateway to `snet-jumpbox`. Omit it and jump boxes fall
+back to Azure **default outbound access**, whose source address is implicit, unpredictable,
+and impossible to allow-list — and which Azure is retiring. With the NAT gateway, all
+outbound traffic from the subnet leaves through one known static public IP.
+
+- It is only deployed when the jump box subnet is. Outbound SNAT with no subnet attached
+  would just be a billed idle resource.
+- A NAT gateway is **zonal or non-zonal, never zone-redundant**. `availabilityZone` defaults
+  to `-1` (non-zonal); if it is set, the public IP is created in the same zone.
+- One Standard SKU static public IP is created by default. Supply `publicIpResourceIds` or
+  `publicIpPrefixResourceIds` instead to keep an address that is already allow-listed, or to
+  get a contiguous allow-listable range.
+- It does not change inbound access. Bastion still handles that, and the jump box NSG still
+  admits RDP and SSH only from `AzureBastionSubnet`.
+- Attaching a NAT gateway overrides any default route to the internet for the subnet, so it
+  takes precedence over a load balancer or instance-level public IP for outbound traffic.
 
 ### Runners subnet
 

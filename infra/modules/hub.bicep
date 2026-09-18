@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { hubBastionType, hubSubnetType, hubVirtualNetworkName } from '../types.bicep'
+import { hubBastionType, hubNatGatewayType, hubSubnetType, hubVirtualNetworkName } from '../types.bicep'
 
 // Hub network for the hub-and-spoke topology.
 //
@@ -27,6 +27,9 @@ param bastion hubBastionType?
 @description('Optional. Subnet for management jump boxes. Omit to deploy the hub without one.')
 param jumpboxSubnet hubSubnetType?
 
+@description('Optional. NAT gateway attached to the jump box subnet. Omit to deploy the hub without one.')
+param natGateway hubNatGatewayType?
+
 @description('Optional. Subnet delegated to `Microsoft.App/environments` for the Container Apps environment that hosts self-hosted GitHub Actions runners. Omit to deploy the hub without one.')
 param runnersSubnet hubSubnetType?
 
@@ -40,7 +43,14 @@ var bastionEnabled = bastion != null && (bastion.?enabled ?? true)
 var jumpboxEnabled = jumpboxSubnet != null && (jumpboxSubnet.?enabled ?? true)
 var runnersEnabled = runnersSubnet != null && (runnersSubnet.?enabled ?? true)
 
+// The NAT gateway exists to give the jump box subnet a predictable outbound address, so it is
+// only deployed when that subnet is.
+var natGatewayEnabled = jumpboxEnabled && natGateway != null && (natGateway.?enabled ?? true)
+
 var virtualNetworkName = hubVirtualNetworkName(name)
+var natGatewayName = natGateway.?name ?? 'ng-${name}'
+var natGatewayZone = natGateway.?availabilityZone ?? -1
+var natGatewayOwnsPublicIp = empty(natGateway.?publicIpResourceIds ?? []) && empty(natGateway.?publicIpPrefixResourceIds ?? [])
 var jumpboxSubnetName = jumpboxSubnet.?name ?? 'snet-jumpbox'
 var runnersSubnetName = runnersSubnet.?name ?? 'snet-runners'
 
@@ -374,6 +384,37 @@ module runnersNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
   }
 }
 
+// A NAT gateway gives the jump box subnet explicit, static outbound SNAT instead of Azure's
+// default outbound access, which uses an unpredictable address that cannot be allow-listed and
+// is being retired. A NAT gateway is zonal or non-zonal - never zone-redundant - so its public
+// IP must sit in the same zone.
+module natGatewayResource 'br/public:avm/res/network/nat-gateway:2.1.1' = if (natGatewayEnabled) {
+  name: 'ng-${name}'
+  params: {
+    name: natGatewayName
+    location: location
+    availabilityZone: natGatewayZone
+    natGatewaySku: natGateway.?skuName ?? 'Standard'
+    idleTimeoutInMinutes: natGateway.?idleTimeoutInMinutes ?? 4
+    publicIpResourceIds: natGateway.?publicIpResourceIds
+    publicIPPrefixResourceIds: natGateway.?publicIpPrefixResourceIds
+    // Only create an address when none was supplied. A NAT gateway requires at least one
+    // Standard SKU static public IP or prefix.
+    publicIPAddresses: natGatewayOwnsPublicIp
+      ? [
+          {
+            name: 'pip-${natGatewayName}'
+            skuName: 'Standard'
+            publicIPAllocationMethod: 'Static'
+            availabilityZones: natGatewayZone == -1 ? [] : [natGatewayZone]
+          }
+        ]
+      : null
+    tags: tags
+    enableTelemetry: enableTelemetry
+  }
+}
+
 module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
   name: 'vnet-${name}'
   params: {
@@ -398,6 +439,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
               name: jumpboxSubnetName
               addressPrefix: jumpboxSubnet!.addressPrefix
               networkSecurityGroupResourceId: jumpboxNetworkSecurityGroup!.outputs.resourceId
+              natGatewayResourceId: natGatewayEnabled ? natGatewayResource!.outputs.resourceId : null
             }
           ]
         : [],
@@ -467,3 +509,6 @@ output jumpboxSubnetResourceId string = jumpboxEnabled
 output runnersSubnetResourceId string = runnersEnabled
   ? resourceId('Microsoft.Network/virtualNetworks/subnets', virtualNetworkName, runnersSubnetName)
   : ''
+
+@description('Resource ID of the NAT gateway attached to the jump box subnet, or an empty string when it is not deployed.')
+output natGatewayResourceId string = natGatewayEnabled ? natGatewayResource!.outputs.resourceId : ''

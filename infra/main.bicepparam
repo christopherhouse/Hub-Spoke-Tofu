@@ -31,6 +31,9 @@ param hubs = [
     jumpboxSubnet: {
       addressPrefix: '10.0.0.64/27'
     }
+    // Outbound SNAT for the jump box subnet through a static, allow-listable public IP,
+    // instead of Azure default outbound access.
+    natGateway: {}
     // A Container Apps environment cannot have its subnet resized afterwards, so this is
     // sized well past the handful of concurrent runners actually needed.
     runnersSubnet: {
