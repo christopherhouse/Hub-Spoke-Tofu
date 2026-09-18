@@ -88,6 +88,7 @@ Bicep targets a scope per module, so subscriptions are data rather than configur
 - Pull requests run `az bicep build`, parameter build, and `az deployment sub what-if`. The bootstrap root is built but never deployed by a workflow.
 - There is a single GitHub Environment, `azure`. There is no dev/test/prod split and no required reviewers, so a merge to `main` deploys. Renaming it means updating both the workflow and the federated credential in the bootstrap template.
 - Use `permissions: id-token: write` and the minimum required repository permissions.
+- Federated credential subjects must match GitHub's **immutable subject claim** form, `repo:<owner>@<ownerId>/<repo>@<repoId>:<trigger>`. Verify against `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` before changing them; the name-only form fails with `AADSTS700213`.
 - Pin third-party actions to immutable commit SHAs with the version in a trailing comment.
 - Use concurrency controls to prevent simultaneous deployments to the same scope.
 

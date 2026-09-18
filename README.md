@@ -127,16 +127,26 @@ gh variable set AZURE_SUBSCRIPTION_ID --body '<subscriptionId output>'
 ### Federated credential subjects
 
 The OIDC subject differs by trigger. A job that declares `environment:` presents the
-environment subject, **not** the branch subject — which is why there are three:
+environment subject, **not** the branch subject — which is why there are three.
+
+This repository has GitHub's **immutable subject claims** enabled, so the subject embeds the
+numeric owner and repository IDs rather than their names. Confirm the exact prefix with:
+
+```powershell
+gh api repos/<owner>/<repo>/actions/oidc/customization/sub
+```
+
+A credential built from the names alone is rejected at run time with `AADSTS700213`.
 
 | Credential | Subject | Used by |
 |---|---|---|
-| `gh-pull-request` | `repo:<owner>/<repo>:pull_request` | the PR build and `what-if` job |
-| `gh-main` | `repo:<owner>/<repo>:ref:refs/heads/main` | validate on push to `main`, and `workflow_dispatch` |
-| `gh-env-azure` | `repo:<owner>/<repo>:environment:azure` | the deploy job |
+| `gh-pull-request` | `repo:<owner>@<ownerId>/<repo>@<repoId>:pull_request` | the PR build and `what-if` job |
+| `gh-main` | `repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main` | validate on push to `main`, and `workflow_dispatch` |
+| `gh-env-azure` | `repo:<owner>@<ownerId>/<repo>@<repoId>:environment:azure` | the deploy job |
 
 Adding a trigger means adding a credential to the bootstrap template and redeploying it.
-Renaming the repository invalidates all three, since the subjects embed its name.
+Because the subjects carry immutable IDs, renaming the account or the repository does **not**
+invalidate them.
 
 ## Notes
 

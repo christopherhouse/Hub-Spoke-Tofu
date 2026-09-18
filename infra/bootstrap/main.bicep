@@ -30,9 +30,17 @@ param location string
 @minLength(1)
 param githubOwner string
 
-@description('Required. GitHub repository name. Federated credential subjects embed this, so renaming the repository means redeploying this template.')
+@description('Required. Numeric ID of the GitHub account or organisation. GitHub issues immutable OIDC subjects for this repository, which embed the numeric IDs rather than the names, so a rename cannot silently break trust. Read it with `gh api users/<owner> --jq .id`.')
+@minValue(1)
+param githubOwnerId int
+
+@description('Required. GitHub repository name.')
 @minLength(1)
 param githubRepository string
+
+@description('Required. Numeric ID of the GitHub repository. Read it with `gh api repos/<owner>/<repo> --jq .id`, and confirm the resulting prefix against `gh api repos/<owner>/<repo>/actions/oidc/customization/sub`.')
+@minValue(1)
+param githubRepositoryId int
 
 @description('Optional. Name of the GitHub Environment the deploy job gates on. There is a single environment; the repository has no dev/test/prod split.')
 @minLength(1)
@@ -56,7 +64,16 @@ var contributorRoleDefinitionId = subscriptionResourceId(
   'b24988ac-6180-42a0-ab88-20f7382dd24c'
 )
 
-var githubRepositorySubjectPrefix = 'repo:${githubOwner}/${githubRepository}'
+// Immutable subject prefix. This repository has `use_immutable_subject` enabled, so the token
+// GitHub presents carries `<name>@<numeric id>` for both the owner and the repository rather
+// than the names alone. Verify with:
+//
+//   gh api repos/<owner>/<repo>/actions/oidc/customization/sub
+//
+// and match `sub_claim_prefix` exactly. A credential built from the names alone fails at run
+// time with AADSTS700213. The upside is that renaming the account or the repository no longer
+// invalidates these credentials.
+var githubRepositorySubjectPrefix = 'repo:${githubOwner}@${githubOwnerId}/${githubRepository}@${githubRepositoryId}'
 
 // Composed rather than read from the module output: a role assignment name must be
 // calculable at the start of the deployment (BCP120), and `principalId` is only known once
