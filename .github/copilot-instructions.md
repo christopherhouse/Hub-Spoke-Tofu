@@ -56,8 +56,11 @@ Bicep targets a scope per module, so subscriptions are data rather than configur
 - Hub and spoke CIDR ranges must not overlap.
 - Each spoke must reference exactly one defined hub unless a future architecture decision explicitly supports another topology.
 - Traditional bidirectional VNet peering is the current design assumption.
-- Azure Bastion Developer must be created for each hub. Do not create an `AzureBastionSubnet` or public IP for Developer SKU unless Azure requirements change.
-- Bastion Developer connects only to virtual machines in its own VNet; do not claim it provides spoke access through peering.
+- Azure Bastion Standard is created for each hub. The Developer SKU was evaluated and rejected: it does not support virtual network peering, so it can only reach virtual machines in its own VNet and cannot serve spokes.
+- A Bastion of any SKU other than Developer requires a dedicated subnet named exactly `AzureBastionSubnet`, sized /26 or larger, plus a Standard SKU public IP. The AVM bastion module creates the public IP from `publicIPAddressObject`.
+- Applying an NSG to `AzureBastionSubnet` is optional, but if one is present it must carry every rule from the Azure Bastion NSG guidance. A missing rule breaks connectivity and blocks platform updates.
+- Jump box and other target subnets allow RDP and SSH only from the `AzureBastionSubnet` prefix, never from the internet.
+- Subnets delegated to `Microsoft.App/environments` for Azure Container Apps must be /27 or larger and are dedicated to that environment. The prefix cannot be changed once an environment exists in it, so size for growth.
 - Keep future firewall, gateway, route-table, and DNS resolver features optional and composable.
 
 ## Private DNS
