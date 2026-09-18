@@ -4,14 +4,17 @@
 
 This repository manages an Azure hub-and-spoke network with OpenTofu. Hubs and spokes may span Azure regions, subscriptions, and resource groups. Topology and environment differences must be data-driven rather than implemented through copied root modules.
 
-The only currently deployable HCL is the isolated `bootstrap/` root used to create remote state storage. Hub-and-spoke resources must not be added to that root.
+There are two deployable roots:
+
+- `bootstrap/` creates the remote state storage account. It is isolated and stays on local state. Hub-and-spoke resources must not be added to it.
+- `infra/` is the single workload root, using the remote backend with state key `hub-spoke/infra.tfstate`. It currently deploys the shared Private DNS zone catalog; hubs and spokes are added here.
 
 ## Required engineering practices
 
 - Generate OpenTofu-compatible HCL and validate with the `tofu` CLI.
 - Pin provider versions and commit `.terraform.lock.hcl`.
 - Put reusable components under `infra/modules/`.
-- Put composition roots and environment values under `infra/environments/`.
+- Keep a single composition root at `infra/`. There is no per-environment root split; environment differences are expressed in variable values.
 - Give every variable and output a useful description and precise type.
 - Add validation for CIDRs, required names, assignment references, and incompatible options.
 - Prefer maps keyed by stable logical names over position-dependent lists.
@@ -65,6 +68,10 @@ The only currently deployable HCL is the isolated `bootstrap/` root used to crea
 - Do not assume every service uses a single zone; storage subresources and some service deployment modes require distinct zones.
 - Treat the zone catalog as reviewed configuration. Verify current Azure Private Link zone names and subresource group IDs against Microsoft documentation before adding them.
 - Include common storage, Key Vault, relational database, Cosmos DB, cache, App Service, Container Apps, container registry, and Azure AI service families only after validating exact service requirements.
+- The verified catalog lives in `infra/modules/private-dns/locals.tf`, keyed by service family. Add zones there rather than inline in a root.
+- Not every zone is global. Container Apps uses `privatelink.<region>.azurecontainerapps.io`, so regional families must expand per region.
+- Do not create separate zones for Azure Container Registry data endpoints (`<region>.data.privatelink.azurecr.io`) or App Service SCM. Both are records inside the parent zone when Azure Private DNS is used.
+- Azure Managed Redis (`privatelink.redis.azure.net`) is a different service and zone from Azure Cache for Redis (`privatelink.redis.cache.windows.net`).
 
 ## Multi-subscription constraint
 

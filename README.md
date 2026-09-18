@@ -11,6 +11,20 @@ OpenTofu infrastructure as code for an Azure hub-and-spoke network that will sup
 
 ## Status
 
-The repository includes only the one-time local bootstrap needed to create Azure Storage for future OpenTofu state. Hub-and-spoke infrastructure and deployment workflows have not been created.
+| Component | State |
+| --- | --- |
+| Remote state backend (`bootstrap/`) | Deployable |
+| Shared Private DNS zone catalog (`infra/`) | Deployable |
+| Hubs, spokes, peering, Bastion | Not yet built |
+| GitHub Actions workflows | Not yet built |
 
-See [bootstrap/README.md](bootstrap/README.md) to create the state backend.
+## Layout
+
+- [`bootstrap/`](bootstrap/README.md) — one-time, local-state root that creates the Azure
+  Storage account for OpenTofu state.
+- [`infra/`](infra/README.md) — the single workload root, using the remote backend. Hubs and
+  spokes are added here.
+- [`infra/modules/private-dns/`](infra/modules/private-dns/README.md) — the verified Private
+  Link DNS zone catalog.
+
+All Azure resources are created through pinned Azure Verified Modules.

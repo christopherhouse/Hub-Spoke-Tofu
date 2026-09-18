@@ -1,0 +1,46 @@
+# Copy to infra.tfvars and adjust. infra.tfvars is gitignored.
+
+subscription_id             = "00000000-0000-0000-0000-000000000000"
+dns_resource_group_name     = "RG-CONNECTIVITY-DNS-CUS"
+dns_resource_group_location = "centralus"
+
+# Each family expands to one or more verified privatelink zones.
+# See infra/modules/private-dns/README.md for the full catalog.
+enabled_zone_families = [
+  "acr",
+  "ai_foundry",
+  "ai_search",
+  "appservice",
+  "containerapps",
+  "cosmos",
+  "keyvault",
+  "mysql",
+  "postgres",
+  "redis_managed",
+  "servicebus",
+  "sql",
+  "storage",
+]
+
+# Container Apps zones are regional, so list every region that will host a
+# Container Apps environment. Required when "containerapps" is enabled.
+container_apps_regions = [
+  "centralus",
+]
+
+# Zones not covered by the catalog, if any.
+additional_private_dns_zones = []
+
+# Hub and spoke virtual networks to link to every zone. Empty until the network
+# roots exist. Keys are 1-20 characters and become the link name prefix.
+private_dns_virtual_network_links = {
+  # hub-cus = {
+  #   virtual_network_id = "/subscriptions/<guid>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>"
+  # }
+}
+
+tags = {
+  workload    = "connectivity"
+  managed-by  = "opentofu"
+  environment = "shared"
+}
