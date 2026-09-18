@@ -11,8 +11,9 @@ param virtualNetworkLinks = []
 
 // Container Apps zones for regions other than `location` must be listed here explicitly,
 // because the module resolves {regionName} from `location` only.
-// e.g. 'privatelink.eastus2.azurecontainerapps.io'
-param additionalPrivateLinkPrivateDnsZonesToInclude = []
+param additionalPrivateLinkPrivateDnsZonesToInclude = [
+  'privatelink.westus3.azurecontainerapps.io'
+]
 
 param tags = {
   workload: 'connectivity'
