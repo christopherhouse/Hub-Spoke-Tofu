@@ -10,7 +10,8 @@ either is a parameter change, not a template change.
 | Capability | Status |
 |---|---|
 | Shared Private Link DNS zone catalog | Implemented |
-| Hub VNet and Bastion Developer | Planned |
+| Hub VNet, subnets, NSGs and Azure Bastion Standard | Implemented |
+| Container Apps runners subnet (delegated, environment not yet deployed) | Implemented |
 | Spoke VNets and peering | Planned |
 | GitHub Actions deploy workflow | Implemented |
 
@@ -20,7 +21,10 @@ either is a parameter change, not a template change.
 infra/
   main.bicep         subscription-scope composition root
   main.bicepparam    parameter values
+  types.bicep        shared user-defined types, e.g. hubType (@export)
   zones.bicep        curated Private Link DNS zone catalog (@export)
+  modules/
+    hub.bicep        hub VNet, subnets, NSGs and Azure Bastion
   README.md
 bicepconfig.json     Bicep linter configuration
 .github/
