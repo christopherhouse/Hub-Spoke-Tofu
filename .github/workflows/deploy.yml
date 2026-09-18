@@ -40,6 +40,11 @@ jobs:
         run: |
           az bicep build --file infra/main.bicep --stdout > /dev/null
           az bicep build-params --file infra/main.bicepparam --stdout > /dev/null
+          # Built but never deployed here. The bootstrap root creates the identity this
+          # workflow authenticates as, so a human deploys it once, by hand. Building it keeps
+          # it from rotting.
+          az bicep build --file infra/bootstrap/main.bicep --stdout > /dev/null
+          az bicep build-params --file infra/bootstrap/main.bicepparam --stdout > /dev/null
 
       - name: Azure login
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
@@ -60,8 +65,9 @@ jobs:
     needs: validate
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # Protected environment supplies the required reviewers gate.
-    environment: production
+    # The repository has a single environment; there is no dev/test/prod split. It carries no
+    # required reviewers, so a merge to main deploys.
+    environment: azure
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

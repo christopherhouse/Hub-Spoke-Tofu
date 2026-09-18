@@ -14,6 +14,7 @@ either is a parameter change, not a template change.
 | Container Apps runners subnet (delegated, environment not yet deployed) | Implemented |
 | Spoke VNets and peering | Planned |
 | GitHub Actions deploy workflow | Implemented |
+| CI/CD deployment identity (OIDC, no secrets) | Implemented |
 
 ## Layout
 
@@ -23,6 +24,9 @@ infra/
   main.bicepparam    parameter values
   types.bicep        shared user-defined types, e.g. hubType (@export)
   zones.bicep        curated Private Link DNS zone catalog (@export)
+  bootstrap/
+    main.bicep       deployment identity, deployed by hand, never by CI
+    main.bicepparam
   modules/
     hub.bicep        hub VNet, subnets, NSGs and Azure Bastion
   README.md
@@ -71,18 +75,82 @@ posts, then merge to deploy.
 ## CI/CD
 
 `.github/workflows/deploy.yml` builds and runs `what-if` on pull requests, then deploys on
-push to `main` through a protected `production` environment.
+push to `main` through the `azure` GitHub Environment. There is a single environment — no
+dev/test/prod split — and it carries no required reviewers, so a merge to `main` deploys.
 
-Configure these **repository variables** (not secrets — OIDC needs no secret):
+Authentication is workload identity federation over OIDC. **No secret of any kind is stored
+in GitHub.** The three values the workflow needs are repository **variables**:
 
 | Variable | Purpose |
 |---|---|
-| `AZURE_CLIENT_ID` | Application ID of the deployment identity |
+| `AZURE_CLIENT_ID` | Client ID of the deployment managed identity |
 | `AZURE_TENANT_ID` | Entra tenant ID |
 | `AZURE_SUBSCRIPTION_ID` | Target subscription |
 
-The deployment identity needs a federated credential for this repository, and RBAC
-sufficient to create resource groups and networking resources in every target subscription.
+### Bootstrap
+
+`infra/bootstrap/main.bicep` creates the identity the workflow authenticates as:
+
+- resource group `RG-CICD-CUS` in `centralus`,
+- user-assigned managed identity `id-hub-spoke-iac-cicd` — a managed identity rather than an
+  Entra app registration, because it needs no application object, which tenants often restrict,
+- three federated credentials, one per OIDC subject the workflow can present,
+- `Contributor` on the target subscription. Not `User Access Administrator`: nothing in the
+  templates creates role assignments.
+
+It is deployed **once, by hand**. CI never deploys it — the deployment identity cannot create
+itself — though the pull request job builds it so it cannot rot.
+
+```powershell
+az deployment sub what-if `
+  --name bootstrap-cicd `
+  --location centralus `
+  --template-file infra/bootstrap/main.bicep `
+  --parameters infra/bootstrap/main.bicepparam
+
+az deployment sub create `
+  --name bootstrap-cicd `
+  --location centralus `
+  --template-file infra/bootstrap/main.bicep `
+  --parameters infra/bootstrap/main.bicepparam
+```
+
+Its outputs feed the repository variables above. Re-running it is a no-op: the role assignment
+name is a deterministic GUID.
+
+The GitHub Environment and the repository variables are the only parts not expressed in Bicep,
+because no Azure template can create them:
+
+```powershell
+gh api -X PUT repos/<owner>/<repo>/environments/azure --silent
+gh variable set AZURE_CLIENT_ID --body '<deploymentIdentityClientId output>'
+gh variable set AZURE_TENANT_ID --body '<tenantId output>'
+gh variable set AZURE_SUBSCRIPTION_ID --body '<subscriptionId output>'
+```
+
+### Federated credential subjects
+
+The OIDC subject differs by trigger. A job that declares `environment:` presents the
+environment subject, **not** the branch subject — which is why there are three.
+
+This repository has GitHub's **immutable subject claims** enabled, so the subject embeds the
+numeric owner and repository IDs rather than their names. Confirm the exact prefix with:
+
+```powershell
+gh api repos/<owner>/<repo>/actions/oidc/customization/sub
+```
+
+A credential built from the names alone is rejected at run time with `AADSTS700213`.
+
+| Credential | Subject | Used by |
+|---|---|---|
+| `gh-pull-request` | `repo:<owner>@<ownerId>/<repo>@<repoId>:pull_request` | the PR build and `what-if` job |
+| `gh-main` | `repo:<owner>@<ownerId>/<repo>@<repoId>:ref:refs/heads/main` | validate on push to `main`, and `workflow_dispatch` |
+| `gh-env-azure` | `repo:<owner>@<ownerId>/<repo>@<repoId>:environment:azure` | the deploy job |
+
+Adding a trigger means adding a credential to the bootstrap template and redeploying it.
+Because the subjects carry immutable IDs, renaming the account or the repository does **not**
+invalidate them.
 
 ## Notes
 

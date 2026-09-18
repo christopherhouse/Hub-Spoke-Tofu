@@ -11,7 +11,8 @@ This repository previously used OpenTofu. That implementation was removed becaus
 ## Required engineering practices
 
 - Generate Bicep and validate with `az bicep build` and `az bicep build-params`.
-- Keep `infra/main.bicep` as the single composition root. There is no per-environment root split; environment differences are expressed in parameter values.
+- Keep `infra/main.bicep` as the single composition root for the network. There is no per-environment root split; environment differences are expressed in parameter values.
+- `infra/bootstrap/main.bicep` is the one permitted second root. It creates the deployment identity that GitHub Actions authenticates as, so it must be deployed by a human, once, and never by CI — the identity cannot create itself. Workflows may build it, but must not deploy it. Do not add anything else to it.
 - Put shared, reviewed data such as the DNS zone catalog in its own `.bicep` file and surface it with `@export()`.
 - Give every parameter and output a `@description`, and mark it `Required.` or `Optional.` in line with AVM conventions.
 - Use `@minLength`, `@maxLength`, `@allowed` and typed parameters instead of free-form strings where a constraint exists.
@@ -38,9 +39,11 @@ This repository previously used OpenTofu. That implementation was removed becaus
 
 - Use Microsoft Entra authentication for all Azure access.
 - Use GitHub Actions workload identity federation with OIDC.
-- Do not use client secrets, certificates stored in GitHub, storage account keys, or SAS tokens.
+- The deployment identity is the user-assigned managed identity `id-hub-spoke-iac-cicd` in `RG-CICD-CUS`, created by `infra/bootstrap/main.bicep`. A managed identity is used rather than an Entra app registration because it needs no application object, which tenants often restrict.
+- Federated credentials trust one subject per workflow trigger: `pull_request`, `ref:refs/heads/main`, and `environment:azure`. A job that declares `environment:` presents the environment subject, not the branch subject. Adding a trigger means adding a credential in the bootstrap template.
+- Do not use client secrets, certificates stored in GitHub, storage account keys, or SAS tokens. GitHub holds only repository variables — `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` — and no secrets.
 - Deploy with `az deployment sub create` at subscription scope.
-- Grant the deployment identity only the RBAC roles it needs, assigned at a management group covering the target subscriptions where practical.
+- Grant the deployment identity only the RBAC roles it needs, assigned at a management group covering the target subscriptions where practical. It currently holds `Contributor` at the target subscription. It is deliberately not `User Access Administrator`; if a template starts creating role assignments, that has to be revisited rather than worked around.
 
 ## Multi-subscription model
 
@@ -85,9 +88,10 @@ Bicep targets a scope per module, so subscriptions are data rather than configur
 
 ## GitHub Actions
 
-- Pull requests run `az bicep build`, parameter build, and `az deployment sub what-if`.
-- Merges to `main` apply only through a protected GitHub Environment with required reviewers.
+- Pull requests run `az bicep build`, parameter build, and `az deployment sub what-if`. The bootstrap root is built but never deployed by a workflow.
+- There is a single GitHub Environment, `azure`. There is no dev/test/prod split and no required reviewers, so a merge to `main` deploys. Renaming it means updating both the workflow and the federated credential in the bootstrap template.
 - Use `permissions: id-token: write` and the minimum required repository permissions.
+- Federated credential subjects must match GitHub's **immutable subject claim** form, `repo:<owner>@<ownerId>/<repo>@<repoId>:<trigger>`. Verify against `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` before changing them; the name-only form fails with `AADSTS700213`.
 - Pin third-party actions to immutable commit SHAs with the version in a trailing comment.
 - Use concurrency controls to prevent simultaneous deployments to the same scope.
 
