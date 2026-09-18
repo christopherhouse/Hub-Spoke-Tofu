@@ -1,0 +1,14 @@
+subscription_id            = "00000000-0000-0000-0000-000000000000"
+create_resource_group      = true
+location                   = "eastus2"
+resource_group_name        = "rg-tofu-state"
+storage_account_name       = "replacewithuniqueaccount"
+container_name             = "tfstate"
+replication_type           = "ZRS"
+state_principal_object_ids = ["00000000-0000-0000-0000-000000000000"]
+enable_telemetry            = true
+
+tags = {
+  managed-by = "opentofu"
+  purpose    = "opentofu-state"
+}

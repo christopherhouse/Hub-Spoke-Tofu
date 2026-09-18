@@ -1,0 +1,58 @@
+# OpenTofu / Terraform working directories
+**/.terraform/*
+**/.tofu/*
+
+# State
+*.tfstate
+*.tfstate.*
+
+# Plans
+*.tfplan
+tfplan
+*.generated.hcl
+
+# Crash and diagnostic logs
+crash.log
+crash.*.log
+
+# Local variable and override files
+*.auto.tfvars
+*.auto.tfvars.json
+*.tfvars.local
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# CLI configuration
+.terraformrc
+terraform.rc
+.tofurc
+tofu.rc
+
+# Credentials and environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.pfx
+*.key
+
+# Azure planner and local CLI artifacts
+.azure/
+
+# Editors and operating systems
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Local test and coverage output
+coverage/
+test-results/
+
+# Keep .terraform.lock.hcl committed after providers are introduced.
