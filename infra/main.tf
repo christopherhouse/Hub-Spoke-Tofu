@@ -1,11 +1,16 @@
-module "dns_resource_group" {
-  source  = "Azure/avm-res-resources-resourcegroup/azurerm"
-  version = "0.4.0"
+locals {
+  # Defaults to the provider subscription, but can point anywhere in the tenant because
+  # the resource-group module targets via parent_id rather than the provider config.
+  dns_subscription_id = coalesce(var.dns_subscription_id, var.subscription_id)
+}
 
-  location         = var.dns_resource_group_location
-  name             = var.dns_resource_group_name
-  tags             = var.tags
-  enable_telemetry = var.enable_telemetry
+module "dns_resource_group" {
+  source = "./modules/resource-group"
+
+  subscription_id = local.dns_subscription_id
+  name            = var.dns_resource_group_name
+  location        = var.dns_resource_group_location
+  tags            = var.tags
 }
 
 module "private_dns" {

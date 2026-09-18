@@ -1,10 +1,29 @@
 variable "subscription_id" {
   type        = string
-  description = "ID of the subscription that owns the shared Private DNS zones."
+  description = <<-DESCRIPTION
+    ID of the subscription the azapi provider is configured with. Resources are targeted by
+    parent_id, so this is the default home subscription rather than a hard boundary; other
+    subscriptions in the same tenant can be targeted without provider aliases.
+  DESCRIPTION
 
   validation {
     condition     = can(regex("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", var.subscription_id))
     error_message = "subscription_id must be a GUID."
+  }
+}
+
+variable "dns_subscription_id" {
+  type        = string
+  default     = null
+  description = <<-DESCRIPTION
+    Subscription that owns the shared Private DNS zones. Defaults to subscription_id. Set
+    this when the connectivity subscription differs from the provider's home subscription.
+    Must be in the same Entra tenant.
+  DESCRIPTION
+
+  validation {
+    condition     = var.dns_subscription_id == null || can(regex("^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$", var.dns_subscription_id))
+    error_message = "dns_subscription_id must be a GUID."
   }
 }
 

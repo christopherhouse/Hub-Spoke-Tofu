@@ -46,7 +46,8 @@ account has shared-key authorization disabled, so there is no key or SAS path av
 
 | Name | Required | Description |
 | --- | --- | --- |
-| `subscription_id` | yes | Subscription that owns the shared Private DNS zones |
+| `subscription_id` | yes | Provider home subscription |
+| `dns_subscription_id` | no | Subscription owning the zones; defaults to `subscription_id` |
 | `dns_resource_group_name` | yes | Resource group created to hold the zones |
 | `dns_resource_group_location` | yes | Region for that resource group |
 | `enabled_zone_families` | yes | Service families to create zones for |
@@ -64,5 +65,19 @@ See `modules/private-dns/README.md` for the zone catalog and the service-specifi
   resource group metadata.
 - `private_dns_virtual_network_links` is empty until hub and spoke VNets exist. Links are
   created against every zone, with registration disabled.
-- All Azure resources come from pinned Azure Verified Modules. There are no direct
-  `azurerm_*` or `azapi_*` resource blocks in this root.
+- All Azure resources come from pinned Azure Verified Modules, with one documented
+  exception: `modules/resource-group`. See that module's README.
+
+## Multi-subscription model
+
+Hubs and spokes may live in different subscriptions within the same Entra tenant. This
+needs no provider aliases: in AzAPI the target subscription comes from the resource ID built
+from `parent_id`, not from the provider's `subscription_id`. Onboarding a subscription is a
+`tfvars` change.
+
+The deployment identity needs rights in every target subscription, including
+`Microsoft.Resources/subscriptions/providers/register/action`, since AzAPI registers
+resource providers in the target subscription. A single management-group assignment covers
+this. Cross-subscription peering additionally needs Network Contributor on **both** VNets.
+
+Cross-*tenant* is out of scope and would require separate credentials or Azure Lighthouse.

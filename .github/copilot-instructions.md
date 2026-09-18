@@ -75,14 +75,31 @@ There are two deployable roots:
 
 ## Multi-subscription constraint
 
-AzureRM provider configurations and aliases are statically declared. Do not promise an unlimited number of arbitrary subscription contexts solely through `tfvars`.
+This repository uses the AzAPI provider, not AzureRM. The two behave differently and the AzureRM guidance about statically declared aliases does not apply here.
 
-Before implementing the root design, choose and document one of these patterns:
+- In AzAPI 2.x the target subscription is determined by the resource ID, built from `parent_id`. The provider's `subscription_id` is not substituted into the request URL.
+- A single `azapi` provider configuration can therefore manage resources in any subscription in the same tenant that the deployment identity can reach. Express hub and spoke subscriptions as data in `tfvars` by passing fully-qualified `parent_id` values.
+- Pin `azapi` to at least `2.9.0`. Version 2.7.0 fixed `azapi_client_config` returning the Azure CLI default subscription, and 2.9.0 fixed `auxiliary_tenant_ids` not reaching the ARM client.
+- Always set `subscription_id` explicitly. When unset the provider shells out to `az account show`, which is nondeterministic in CI.
 
-1. One independently planned state stack per subscription, with explicit cross-stack inputs for shared hub and DNS resources.
-2. A bounded set of statically declared AzureRM provider aliases passed into modules.
+Known exceptions that are genuinely bound to the provider's subscription:
 
-Prefer per-subscription stacks when the subscription count is open-ended or managed by separate teams.
+- `Azure/avm-res-resources-resourcegroup/azurerm` sets `parent_id` from `data.azapi_client_config.current.subscription_id`, so it can only create resource groups in the provider's own subscription. Creating resource groups in other subscriptions requires a provider alias per subscription, or taking pre-provisioned resource group IDs as input.
+- AzAPI registers resource providers in the target subscription, so the identity needs `Microsoft.Resources/subscriptions/providers/register/action` there, or provider registration must be skipped.
+- Cross-tenant management is not covered by a single provider configuration. It requires `auxiliary_tenant_ids` for linked authorization, and separate credentials or Azure Lighthouse delegation to actually manage resources.
+
+Prefer per-subscription state stacks only when subscriptions are managed by separate teams with separate approval boundaries, not merely because they are numerous.
+
+## Multi-subscription decision
+
+Decided 2026-09-18. All hub and spoke subscriptions are in a single Entra tenant, there are a small number of them, and they share one state.
+
+- Use a single `azapi` provider configuration and a single state for the whole topology.
+- Express every subscription as data in `tfvars`. Never add a provider alias to onboard a subscription.
+- Create resource groups through `infra/modules/resource-group`, which sets `parent_id` explicitly. Do not use the resource group AVM, for the reason documented in that module.
+- Pass `module.<rg>.resource_id` as `parent_id` to AVMs so the subscription flows through the resource ID.
+- Grant the deployment identity at a management group covering the subscriptions, including provider registration rights.
+- Revisit this decision if subscriptions ever span tenants, or if separate teams need independent approval boundaries.
 
 ## GitHub Actions
 
