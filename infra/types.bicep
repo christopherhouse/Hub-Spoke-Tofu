@@ -129,6 +129,108 @@ type hubSubnetType = {
 }
 
 @export()
+@description('Optional. Marketplace image for a jump box. Defaults to Windows Server 2025 Datacenter, Generation 2, with the desktop experience.')
+type jumpboxImageType = {
+  @description('Required. Image publisher, for example `MicrosoftWindowsServer`.')
+  @minLength(1)
+  publisher: string
+
+  @description('Required. Image offer, for example `WindowsServer`.')
+  @minLength(1)
+  offer: string
+
+  @description('Required. Image SKU. It must be a Generation 2 SKU, because Trusted Launch is not available on Generation 1, and it must appear on the Azure automatic guest patching supported image list. `2025-datacenter-azure-edition` is the desktop experience; `2025-datacenter-azure-edition-core` is Server Core. Note that `2025-datacenter-g2` is Generation 2 but is NOT supported for automatic guest patching.')
+  @minLength(1)
+  sku: string
+
+  @description('Optional. Image version. Defaults to `latest`. A virtual machine is not re-imaged when a newer version is published, so this only affects a rebuild.')
+  version: string?
+}
+
+@export()
+@description('Optional. Auto-shutdown schedule for a jump box. It creates a `Microsoft.DevTestLab/schedules` resource, which deallocates the virtual machine so it stops billing for compute.')
+type jumpboxAutoShutdownType = {
+  @description('Optional. Enable the schedule. Defaults to `true`.')
+  enabled: bool?
+
+  @description('Optional. Time of day to shut down, as a 24-hour `HHmm` string. Defaults to `1800`.')
+  @minLength(4)
+  @maxLength(4)
+  time: string?
+
+  @description('Optional. Windows time zone ID the time is expressed in, for example `Central Standard Time`. Defaults to `Central Standard Time`. A Windows ID is used rather than an IANA one, and it covers daylight saving, so the schedule follows the local clock.')
+  timeZone: string?
+}
+
+@export()
+@description('Optional. First-boot tooling for a jump box, installed by a run command. It re-runs on every deployment, so the package list is kept current rather than applied once.')
+type jumpboxBootstrapType = {
+  @description('Optional. Install the tooling. Defaults to `true`.')
+  enabled: bool?
+
+  @description('Optional. Chocolatey package IDs to install. Defaults to the standard platform-engineering set. Chocolatey is used because Windows Server ships no package manager of its own.')
+  packages: string[]?
+
+  @description('Optional. Install the Az PowerShell module from the PowerShell Gallery. Defaults to `true`. It is not a Chocolatey package because the Gallery is its first-party source.')
+  installAzPowerShell: bool?
+
+  @description('Optional. How long the bootstrap may run before Azure abandons it, in seconds. Defaults to `3600`. A cold install of the full package set is slow.')
+  @minValue(300)
+  @maxValue(5400)
+  timeoutInSeconds: int?
+}
+
+@export()
+@description('Required. A management jump box in a hub. It lands in the hub jump box subnet, has no public IP, and is reachable only through Azure Bastion.')
+type jumpboxType = {
+  @description('Required. Name of the virtual machine. It is used verbatim, as both the Azure resource name and the Windows computer name, so it is capped at the 15-character NetBIOS limit rather than Azure\'s longer one.')
+  @minLength(1)
+  @maxLength(15)
+  name: string
+
+  @description('Optional. Deploy the jump box. Defaults to `true`. Set `false` to keep the definition but remove the virtual machine.')
+  enabled: bool?
+
+  @description('Optional. Virtual machine size. Defaults to `Standard_D4as_v7`. Availability is regional: the burstable x64 B-series is not offered in every region, so check with `az vm list-skus` before changing it.')
+  @minLength(1)
+  vmSize: string?
+
+  @description('Optional. Availability zone. Defaults to `-1`, meaning no zone. A single jump box gains nothing from a zone, and pinning one limits which sizes can be used.')
+  availabilityZone: (-1 | 1 | 2 | 3)?
+
+  @description('Optional. Marketplace image. Defaults to Windows Server 2025 Datacenter Generation 2 with the desktop experience.')
+  image: jumpboxImageType?
+
+  @description('Optional. OS disk size in GB. Defaults to the image default when omitted.')
+  @minValue(30)
+  @maxValue(4095)
+  osDiskSizeGB: int?
+
+  @description('Optional. OS disk storage type. Defaults to `Premium_LRS`.')
+  osDiskStorageAccountType: ('PremiumV2_LRS' | 'Premium_LRS' | 'Premium_ZRS' | 'StandardSSD_LRS' | 'StandardSSD_ZRS' | 'Standard_LRS')?
+
+  @description('Optional. Name of the local administrator account. Defaults to `azureadmin`. Its password is generated at deployment time and deliberately never stored or returned: ordinary sign-in is with Entra ID, and the break-glass path is a password reset through the VMAccess extension. See infra/README.md.')
+  @minLength(1)
+  @maxLength(20)
+  adminUsername: string?
+
+  @description('Optional. Install the Entra ID login extension, so the virtual machine accepts Entra credentials over Bastion. Defaults to `true`. Sign-in additionally needs the `Virtual Machine Administrator Login` or `Virtual Machine User Login` role, which this deployment cannot assign; see infra/README.md.')
+  entraLogin: bool?
+
+  @description('Optional. Enable accelerated networking on the network interface. Defaults to `false`. Not every size supports it, and a jump box is not throughput-bound.')
+  enableAcceleratedNetworking: bool?
+
+  @description('Optional. Auto-shutdown schedule. Defaults to 18:00 Central, daily. Set `enabled: false` to leave the jump box running.')
+  autoShutdown: jumpboxAutoShutdownType?
+
+  @description('Optional. First-boot tooling. Omit to take the default package set.')
+  bootstrap: jumpboxBootstrapType?
+
+  @description('Optional. Tags applied to the jump box and its network interface. Defaults to the hub tags.')
+  tags: object?
+}
+
+@export()
 @description('Required. A hub in the hub-and-spoke topology.')
 type hubType = {
   @description('Required. Short name of the hub. Resource names are derived from it, for example `vnet-<name>` and `bas-<name>`.')
@@ -165,6 +267,9 @@ type hubType = {
 
   @description('Optional. Subnet for the Azure Container Apps environment that hosts self-hosted GitHub Actions runners. Delegated to `Microsoft.App/environments`. A workload profile environment requires /27 or larger, and the prefix cannot be changed once an environment exists in it.')
   runnersSubnet: hubSubnetType?
+
+  @description('Optional. Management jump boxes in the hub. Each one lands in the jump box subnet with no public IP and is reachable only through Bastion. Requires `jumpboxSubnet`.')
+  jumpboxes: jumpboxType[]?
 
   @description('Optional. Tags applied to the hub resource group and every hub resource.')
   tags: object?
