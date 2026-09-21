@@ -89,6 +89,105 @@ param spokes = [
       }
     ]
   }
+  // Shared platform services for the region: the Log Analytics workspace every resource sends
+  // diagnostics to, the Key Vault holding CI/CD credentials, and the registry holding the
+  // self-hosted runner image. They live in a spoke rather than the hub so the hub stays
+  // connectivity-only.
+  //
+  // Spoke 2 is 10.1.16.0/20 (10.1.16.0 - 10.1.31.255):
+  //   10.1.16.0/24   snet-privateendpoints
+  //   10.1.17.0 - 10.1.31.255   free
+  {
+    name: 'spoke-platform-cus'
+    hubName: 'hub-cus'
+    location: 'centralus'
+    resourceGroupName: 'RG-PLATFORM-SHARED-CUS'
+    addressPrefixes: [
+      '10.1.16.0/20'
+    ]
+    subnets: [
+      {
+        name: 'snet-privateendpoints'
+        addressPrefix: '10.1.16.0/24'
+        allowBastionAccess: false
+        privateEndpointNetworkPolicies: 'Disabled'
+      }
+    ]
+  }
+]
+
+// Shared platform services. `spokeName` supplies the subscription, resource group and region,
+// so none of them is restated. The Key Vault and registry names are globally unique across
+// Azure, which is why they are data rather than derived.
+param platform = {
+  name: 'platform-cus'
+  spokeName: 'spoke-platform-cus'
+  privateEndpointSubnetName: 'snet-privateendpoints'
+  logAnalytics: {
+    // 30 days is included at no extra charge. The daily cap is a guard rail against a runaway
+    // diagnostic source, not a capacity plan; raise it if ingestion is legitimately throttled.
+    dataRetention: 30
+    dailyQuotaGb: '1'
+  }
+  keyVault: {
+    name: 'kv-platform-cus-hsiac'
+  }
+  containerRegistry: {
+    name: 'acrplatformcushsiac'
+    // `az acr build` runs on Microsoft-managed ACR Tasks compute outside the virtual network,
+    // so a registry with public access fully disabled would reject the image build that has to
+    // happen before any runner exists. These are the IPv4 prefixes of the
+    // AzureContainerRegistry.CentralUS service tag; everything else is denied and runners pull
+    // over the private endpoint. Refresh them with the command in infra/README.md.
+    allowedPublicIpRanges: [
+      '13.89.170.216/29'
+      '13.89.175.0/25'
+      '13.89.178.192/26'
+      '20.40.224.64/26'
+      '20.44.11.0/25'
+      '20.44.11.128/26'
+      '20.44.12.0/25'
+      '52.182.138.208/29'
+      '52.182.142.0/25'
+      '52.182.142.128/25'
+      '57.175.72.0/26'
+      '72.152.15.0/26'
+      '104.208.16.80/29'
+      '172.212.129.0/24'
+    ]
+  }
+}
+
+// The Container Apps environment that hosts the runner jobs, in the hub runners subnet.
+param containerAppsEnvironment = {
+  hubName: 'hub-cus'
+}
+
+// The GitHub App the runners authenticate as. `applicationId` is the App ID shown on the App
+// settings page and `installationId` identifies the App's single installation on the account;
+// neither is a secret. The private key is never set here: it is pasted into the Key Vault
+// secret named `github-app-private-key`, once, from the jump box. See infra/README.md.
+//
+// Leave this commented out until the App exists, otherwise the runner jobs deploy with an
+// application ID that cannot mint a token.
+// param githubApp = {
+//   applicationId: '123456'
+//   installationId: '98765432'
+// }
+
+// One entry per repository. Onboarding repository N+1 is one entry here plus selecting it in
+// the App installation; nothing else changes, and `installationId` is not repeated because a
+// GitHub App has one installation per account.
+//
+// Only ever list **private** repositories. A self-hosted runner attached to a public
+// repository will execute code from any fork.
+//
+// The markers below are load-bearing: .github/workflows/onboard-runner.yml inserts new
+// entries between them and opens a pull request. Hand-editing inside them is fine; do not
+// remove them.
+param githubRunners = [
+  // BEGIN runners
+  // END runners
 ]
 
 // Extra virtual networks to link to every zone, beyond the hubs above, which are linked

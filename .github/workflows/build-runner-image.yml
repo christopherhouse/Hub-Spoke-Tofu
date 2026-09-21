@@ -1,0 +1,89 @@
+name: Build runner image
+
+# Builds the self-hosted runner image with ACR Tasks, server-side.
+#
+# `az acr build` uploads the build context to Azure and builds it on Microsoft-managed
+# compute. Nothing is built on the GitHub-hosted runner, and nothing can be built on a
+# self-hosted runner either: a Container Apps job cannot run Docker inside the container.
+# That is also the answer to the chicken-and-egg problem, because this workflow can produce
+# the first image before any runner exists.
+#
+# The registry denies public access by default. It admits the AzureContainerRegistry service
+# tag prefixes listed in infra/main.bicepparam, which is what lets this build reach it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'images/github-runner/**'
+      - '.github/workflows/build-runner-image.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'images/github-runner/**'
+      - '.github/workflows/build-runner-image.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag to publish, in addition to latest.'
+        required: false
+        type: string
+  schedule:
+    # Weekly. The image pins a runner version and runs with --disableupdate, and GitHub
+    # refuses connections from runners roughly 30 days behind, so an image that is never
+    # rebuilt eventually stops being able to register at all. This also picks up base image
+    # security updates. 06:00 UTC Monday is outside the working day in Central time.
+    - cron: '0 6 * * 1'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: build-runner-image
+  cancel-in-progress: false
+
+env:
+  # Must match platform.containerRegistry.name in infra/main.bicepparam.
+  REGISTRY_NAME: acrplatformcushsiac
+  IMAGE_NAME: github-runner
+
+jobs:
+  build:
+    name: ACR build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Lint the entrypoint
+        # Catches the class of shell bug that would otherwise only surface as a runner that
+        # registers and immediately dies.
+        run: shellcheck images/github-runner/entrypoint.sh
+
+      - name: Azure login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push
+        # On a pull request the image is built but not pushed, so a broken Dockerfile fails
+        # review rather than replacing the tag every runner job pulls.
+        run: |
+          set -euo pipefail
+
+          args=(--registry "$REGISTRY_NAME" --file images/github-runner/Dockerfile)
+
+          if [ "${{ github.event_name }}" = 'pull_request' ]; then
+            args+=(--no-push --image "$IMAGE_NAME:pr-${{ github.event.number }}")
+          else
+            args+=(--image "$IMAGE_NAME:latest")
+            args+=(--image "$IMAGE_NAME:${{ github.sha }}")
+            if [ -n "${{ inputs.tag }}" ]; then
+              args+=(--image "$IMAGE_NAME:${{ inputs.tag }}")
+            fi
+          fi
+
+          az acr build "${args[@]}" images/github-runner

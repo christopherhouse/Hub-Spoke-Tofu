@@ -41,6 +41,9 @@ param useRemoteGateways bool = false
 @description('Optional. Let the hub share its gateway with this spoke. Defaults to `false`. Set it together with `useRemoteGateways` once a hub gateway exists.')
 param allowHubGatewayTransit bool = false
 
+@description('Optional. Resource ID of the shared Log Analytics workspace that receives diagnostics from every spoke resource. Empty to create no diagnostic settings. The workspace must already exist, because a diagnostic setting naming one that does not fails the deployment.')
+param logAnalyticsWorkspaceResourceId string = ''
+
 @description('Optional. Tags applied to every resource in the spoke.')
 param tags object?
 
@@ -50,6 +53,17 @@ param enableTelemetry bool = true
 var virtualNetworkName = spokeVirtualNetworkName(name)
 
 var bastionAccessAvailable = !empty(hubBastionSubnetAddressPrefix)
+
+// One diagnostic setting shape, reused by every module below, so that turning diagnostics on
+// or off is a single decision rather than a per-resource one.
+var spokeDiagnosticSettings = empty(logAnalyticsWorkspaceResourceId)
+  ? null
+  : [
+      {
+        name: 'send-to-log-analytics'
+        workspaceResourceId: logAnalyticsWorkspaceResourceId
+      }
+    ]
 
 // One NSG per subnet. The rule set is the generated Bastion rule, where applicable, followed
 // by whatever the caller supplied; caller rules are appended so a generated rule can never be
@@ -64,6 +78,7 @@ module subnetNetworkSecurityGroups 'br/public:avm/res/network/network-security-g
       name: subnetNetworkSecurityGroupName(virtualNetworkName, subnet.name)
       location: location
       tags: tags
+      diagnosticSettings: spokeDiagnosticSettings
       enableTelemetry: enableTelemetry
       securityRules: concat(
         bastionAccessAvailable && (subnet.?allowBastionAccess ?? true)
@@ -104,6 +119,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
     location: location
     addressPrefixes: addressPrefixes
     tags: tags
+    diagnosticSettings: spokeDiagnosticSettings
     enableTelemetry: enableTelemetry
     subnets: [
       for (subnet, index) in subnets: {

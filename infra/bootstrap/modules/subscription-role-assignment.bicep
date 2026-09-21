@@ -1,6 +1,7 @@
 targetScope = 'subscription'
 
-// Grants the deployment identity Contributor on the subscription this module is scoped to.
+// Grants the deployment identity a built-in role on the subscription this module is scoped to,
+// optionally narrowed by an ABAC condition.
 //
 // Split out of infra/bootstrap/main.bicep because a role assignment is created at the scope
 // it applies to. The bootstrap root is subscription-scoped, so reaching another subscription
@@ -24,6 +25,10 @@ param roleDefinitionGuid string
 @description('Optional. Description recorded on the role assignment, so its purpose is visible in the portal.')
 @maxLength(1024)
 param assignmentDescription string = 'Lets GitHub Actions deploy infra/main.bicep into this subscription.'
+
+@description('Optional. ABAC condition restricting what the assignment allows. Empty for an unconditional assignment. Used to hand out Role Based Access Control Administrator while limiting it to the specific role definitions the templates assign, so the identity still cannot widen its own access.')
+@maxLength(8000)
+param condition string = ''
 
 // Resolved here rather than passed in. subscriptionResourceId() binds to this module's target
 // subscription, so a cross-subscription assignment references a role definition ID in the
@@ -56,6 +61,10 @@ resource assignment 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     // the type.
     principalType: 'ServicePrincipal'
     description: assignmentDescription
+    condition: empty(condition) ? null : condition
+    // Version 2.0 is the only version that supports the role assignment request attributes the
+    // condition above uses. It must be omitted entirely when there is no condition.
+    conditionVersion: empty(condition) ? null : '2.0'
   }
 }
 

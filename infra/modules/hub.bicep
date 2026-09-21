@@ -36,6 +36,9 @@ param runnersSubnet hubSubnetType?
 @description('Optional. Management jump boxes. Each lands in the jump box subnet with no public IP. Requires `jumpboxSubnet`.')
 param jumpboxes jumpboxType[] = []
 
+@description('Optional. Resource ID of the shared Log Analytics workspace that receives diagnostics from every hub resource. Empty to create no diagnostic settings. The workspace must already exist, because a diagnostic setting naming one that does not fails the deployment.')
+param logAnalyticsWorkspaceResourceId string = ''
+
 @description('Optional. Tags applied to every resource in the hub.')
 param tags object?
 
@@ -46,14 +49,27 @@ var bastionEnabled = bastion != null && (bastion.?enabled ?? true)
 var jumpboxEnabled = jumpboxSubnet != null && (jumpboxSubnet.?enabled ?? true)
 var runnersEnabled = runnersSubnet != null && (runnersSubnet.?enabled ?? true)
 
+// One diagnostic setting shape, reused by every module below, so that turning diagnostics on
+// or off is a single decision rather than a per-resource one.
+var hubDiagnosticSettings = empty(logAnalyticsWorkspaceResourceId)
+  ? null
+  : [
+      {
+        name: 'send-to-log-analytics'
+        workspaceResourceId: logAnalyticsWorkspaceResourceId
+      }
+    ]
+
 // A jump box needs somewhere to land. Filtering here rather than failing means a hub can carry
 // jump box definitions before the subnet exists; the jump boxes simply do not deploy, and
 // infra/README.md states the requirement.
 var jumpboxesToDeploy = jumpboxEnabled ? filter(jumpboxes, jumpbox => jumpbox.?enabled ?? true) : []
 
-// The NAT gateway exists to give the jump box subnet a predictable outbound address, so it is
-// only deployed when that subnet is.
-var natGatewayEnabled = jumpboxEnabled && natGateway != null && (natGateway.?enabled ?? true)
+// The NAT gateway gives a predictable, allow-listable outbound address to every subnet that
+// originates traffic: the jump boxes, and the Container Apps runners, which reach GitHub,
+// package feeds and the container registry. It is deployed whenever at least one of those
+// subnets exists, because either one alone justifies it.
+var natGatewayEnabled = (jumpboxEnabled || runnersEnabled) && natGateway != null && (natGateway.?enabled ?? true)
 
 var virtualNetworkName = hubVirtualNetworkName(name)
 var natGatewayName = natGateway.?name ?? 'ng-${name}'
@@ -75,6 +91,7 @@ module bastionNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
     name: subnetNetworkSecurityGroupName(virtualNetworkName, 'bastion')
     location: location
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     securityRules: concat(
       [
@@ -215,6 +232,7 @@ module jumpboxNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
     name: subnetNetworkSecurityGroupName(virtualNetworkName, 'jumpbox')
     location: location
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     securityRules: concat(
       bastionEnabled
@@ -254,6 +272,7 @@ module runnersNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
     name: subnetNetworkSecurityGroupName(virtualNetworkName, 'runners')
     location: location
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     securityRules: concat(
       [
@@ -428,6 +447,9 @@ module natGatewayResource 'br/public:avm/res/network/nat-gateway:2.1.1' = if (na
             skuName: 'Standard'
             publicIPAllocationMethod: 'Static'
             availabilityZones: natGatewayZone == -1 ? [] : [natGatewayZone]
+            // The NAT gateway itself emits no logs. Its public IP does, and that is where a
+            // SNAT port exhaustion problem would first become visible.
+            diagnosticSettings: hubDiagnosticSettings
           }
         ]
       : null
@@ -443,6 +465,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
     location: location
     addressPrefixes: addressPrefixes
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     subnets: concat(
       bastionEnabled
@@ -474,6 +497,11 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
               networkSecurityGroupResourceId: runnersNetworkSecurityGroup!.outputs.resourceId
               // Mandatory for a Container Apps workload profile environment.
               delegation: 'Microsoft.App/environments'
+              // Azure NAT Gateway integration is supported on a workload profile
+              // environment's infrastructure subnet, and gives every runner replica the same
+              // static outbound address instead of an ephemeral one that cannot be
+              // allow-listed by GitHub or by anything else the runners reach.
+              natGatewayResourceId: natGatewayEnabled ? natGatewayResource!.outputs.resourceId : null
               privateEndpointNetworkPolicies: runnersSubnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
             }
           ]
@@ -498,8 +526,10 @@ module bastionHost 'br/public:avm/res/network/bastion-host:0.8.2' = if (bastionE
       name: 'pip-${bastion.?name ?? 'bas-${name}'}'
       skuName: 'Standard'
       publicIPAllocationMethod: 'Static'
+      diagnosticSettings: hubDiagnosticSettings
     }
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
   }
 }
