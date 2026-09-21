@@ -15,6 +15,23 @@ import { securityRuleType } from 'br/public:avm/res/network/network-security-gro
 type subnetSecurityRuleType = securityRuleType
 
 @export()
+@description('Optional. Whether NSGs and route tables apply to private endpoints in a subnet.')
+type subnetPrivateEndpointNetworkPoliciesType =
+  | 'Disabled'
+  | 'Enabled'
+  | 'NetworkSecurityGroupEnabled'
+  | 'RouteTableEnabled'
+
+// Always sent explicitly, never left to the Azure Resource Manager default. Recent subnet API
+// versions changed that default from `Disabled` to `Enabled`, so a template that omits the
+// property produces a permanent what-if difference against any subnet created before the
+// change, and its value silently depends on the module version in use. `Disabled` matches
+// both the documented ARM default and the deployed subnets. See infra/README.md.
+@export()
+@description('Optional. Default private endpoint network policies applied to every subnet that does not override it.')
+var defaultPrivateEndpointNetworkPolicies = 'Disabled'
+
+@export()
 @description('Returns the virtual network name a hub of the given name deploys. Single source of the convention, so callers can build a hub virtual network resource ID without reading the hub module outputs.')
 func hubVirtualNetworkName(hubName string) string => 'vnet-${hubName}'
 
@@ -55,6 +72,9 @@ type hubBastionType = {
 
   @description('Optional. Extra security rules appended to the `AzureBastionSubnet` NSG. The required Azure Bastion rule set is always present and is never replaced; removing any of it breaks connectivity and blocks platform updates. Generated rules occupy priorities 120-150, so use 300 or above.')
   securityRules: subnetSecurityRuleType[]?
+
+  @description('Optional. Private endpoint network policies for the `AzureBastionSubnet`. Defaults to `Disabled`. The subnet is dedicated to Bastion and hosts no private endpoints, so this only exists to keep the value explicit.')
+  privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
 }
 
 @export()
@@ -103,6 +123,9 @@ type hubSubnetType = {
 
   @description('Optional. Extra security rules appended to this subnet\'s NSG. Every subnet gets its own NSG, so rules can be added here without any template change. The rules generated for the subnet are always kept; see the reserved priority ranges in infra/README.md.')
   securityRules: subnetSecurityRuleType[]?
+
+  @description('Optional. Private endpoint network policies for the subnet. Defaults to `Disabled`. Set `Enabled` on a subnet that hosts private endpoints and whose NSG or route table must apply to them.')
+  privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
 }
 
 @export()
@@ -168,8 +191,8 @@ type spokeSubnetType = {
   @description('Optional. Service endpoints to enable on the subnet, for example `Microsoft.Storage`. Prefer private endpoints where the service supports them.')
   serviceEndpoints: string[]?
 
-  @description('Optional. Private endpoint network policies. Azure defaults this to `Disabled` on subnets that host private endpoints.')
-  privateEndpointNetworkPolicies: ('Disabled' | 'Enabled' | 'NetworkSecurityGroupEnabled' | 'RouteTableEnabled')?
+  @description('Optional. Private endpoint network policies for the subnet. Defaults to `Disabled`. Set `Enabled` on a subnet that hosts private endpoints and whose NSG or route table must apply to them.')
+  privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
 
   @description('Optional. Extra security rules appended to this subnet\'s NSG. The generated Bastion rule occupies priority 100, so use 200 or above.')
   securityRules: subnetSecurityRuleType[]?

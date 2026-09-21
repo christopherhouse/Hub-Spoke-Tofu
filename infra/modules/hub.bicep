@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { hubBastionType, hubNatGatewayType, hubSubnetType, hubVirtualNetworkName, subnetNetworkSecurityGroupName } from '../types.bicep'
+import { hubBastionType, hubNatGatewayType, hubSubnetType, hubVirtualNetworkName, subnetNetworkSecurityGroupName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
 
 // Hub network for the hub-and-spoke topology.
 //
@@ -443,6 +443,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
               name: bastionSubnetName
               addressPrefix: bastion!.subnetAddressPrefix
               networkSecurityGroupResourceId: bastionNetworkSecurityGroup!.outputs.resourceId
+              privateEndpointNetworkPolicies: bastion.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
             }
           ]
         : [],
@@ -453,6 +454,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
               addressPrefix: jumpboxSubnet!.addressPrefix
               networkSecurityGroupResourceId: jumpboxNetworkSecurityGroup!.outputs.resourceId
               natGatewayResourceId: natGatewayEnabled ? natGatewayResource!.outputs.resourceId : null
+              privateEndpointNetworkPolicies: jumpboxSubnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
             }
           ]
         : [],
@@ -464,6 +466,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
               networkSecurityGroupResourceId: runnersNetworkSecurityGroup!.outputs.resourceId
               // Mandatory for a Container Apps workload profile environment.
               delegation: 'Microsoft.App/environments'
+              privateEndpointNetworkPolicies: runnersSubnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
             }
           ]
         : []

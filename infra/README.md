@@ -237,6 +237,25 @@ these ranges:
 A rule `description` must be **140 characters or fewer**. `az bicep build` does not catch
 this; Azure rejects it at preflight with `SecurityRuleDescriptionTooLong`.
 
+### Private endpoint network policies
+
+`privateEndpointNetworkPolicies` controls whether a subnet's NSG and route table apply to
+private endpoints *in that subnet*. Every subnet sends it **explicitly**, defaulting to
+`Disabled` via `defaultPrivateEndpointNetworkPolicies` in `types.bicep`.
+
+Leaving it unset is what causes drift. Recent subnet API versions changed the Azure Resource
+Manager default from `Disabled` to `Enabled`, while the documented default and every subnet
+created before the change are `Disabled`. A template that omits the property therefore reports
+a permanent `Disabled => Enabled` difference in `what-if` against existing subnets, and the
+value a new subnet lands on depends on which AVM version happens to be pinned. The AVM virtual
+network module passes the property straight through as `null` when it is not supplied, so it
+does not shield callers from this. Sending a value explicitly removes both problems.
+
+Set `privateEndpointNetworkPolicies: 'Enabled'` on a subnet that hosts private endpoints and
+whose NSG or route table must filter or redirect traffic to them — for example to force
+private endpoint traffic through a firewall. This is not a policy-driven setting; no Azure
+Policy in this tenant modifies it.
+
 ## Zone catalog
 
 `zones.bicep` exports `curatedPrivateLinkPrivateDnsZones`, 24 zones verified against the

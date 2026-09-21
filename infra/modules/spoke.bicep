@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { spokeSubnetType, subnetNetworkSecurityGroupName, spokeVirtualNetworkName } from '../types.bicep'
+import { spokeSubnetType, subnetNetworkSecurityGroupName, spokeVirtualNetworkName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
 
 // Spoke network for the hub-and-spoke topology.
 //
@@ -112,7 +112,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
         networkSecurityGroupResourceId: subnetNetworkSecurityGroups[index].outputs.resourceId
         delegation: subnet.?delegation
         serviceEndpoints: subnet.?serviceEndpoints
-        privateEndpointNetworkPolicies: subnet.?privateEndpointNetworkPolicies
+        privateEndpointNetworkPolicies: subnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
       }
     ]
     peerings: [
