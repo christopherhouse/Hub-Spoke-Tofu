@@ -39,6 +39,16 @@ param hubs = [
     runnersSubnet: {
       addressPrefix: '10.0.0.128/26'
     }
+    // Management jump boxes. No public IP; Bastion is the only way in, and the jump box
+    // subnet NSG admits RDP and SSH from AzureBastionSubnet alone. Sign in with Entra ID.
+    //
+    // Standard_D4as_v7, not a burstable B-series: the x64 B-series is not offered in
+    // centralus at all. Check with `az vm list-skus -l <region>` before changing the size.
+    jumpboxes: [
+      {
+        name: 'vm-jb-cus-01'
+      }
+    ]
   }
 ]
 

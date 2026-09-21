@@ -20,6 +20,7 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `br/public:avm/res/network/virtual-network` | `0.9.0` |
 | `br/public:avm/res/network/network-security-group` | `0.5.3` |
 | `br/public:avm/res/network/bastion-host` | `0.8.2` |
+| `br/public:avm/res/compute/virtual-machine` | `0.22.3` |
 
 `avm/ptn/network/hub-networking` is **not** used. Its README flags the module as orphaned —
 only security and bug fixes are handled — and its shape assumes a mesh-peered multi-hub
@@ -113,6 +114,117 @@ outbound traffic from the subnet leaves through one known static public IP.
   admits RDP and SSH only from `AzureBastionSubnet`.
 - Attaching a NAT gateway overrides any default route to the internet for the subnet, so it
   takes precedence over a load balancer or instance-level public IP for outbound traffic.
+
+### Jump boxes
+
+`jumpboxes` on a hub is an array, so a hub can carry none, one, or several. Each entry
+deploys one Windows virtual machine into `snet-jumpbox` through
+`infra/modules/jumpbox.bicep`. A jump box has **no public IP**; the only way in is Bastion,
+and the jump box NSG admits RDP and SSH only from `AzureBastionSubnet`.
+
+Only `name` is required. It is used verbatim as both the Azure resource name and the Windows
+computer name, so it is capped at 15 characters.
+
+```bicep
+jumpboxes: [
+  {
+    name: 'vm-jb-cus-01'
+  }
+]
+```
+
+#### Defaults, and why
+
+| Setting | Default | Reason |
+|---|---|---|
+| `vmSize` | `Standard_D4as_v7` | `Standard_B4as_v2` **does not exist in `centralus`**; the only B-series there is Arm64, and automatic guest patching is x64-only. There is no v5 D-series either. Check with `az vm list-skus -l <region> --resource-type virtualMachines` before assuming a size exists. |
+| `image` | `MicrosoftWindowsServer/WindowsServer/2025-datacenter-azure-edition` | Has to satisfy two constraints at once: Generation 2 for Trusted Launch, **and** an exact publisher/offer/SKU from the [automatic guest patching supported image list](https://learn.microsoft.com/azure/virtual-machines/automatic-vm-guest-patching#supported-os-images). `2025-datacenter-g2` is Generation 2 but is **not** on that list, and deploying it with `AutomaticByPlatform` fails preflight with `InvalidParameter ... patchSettings.patchMode`. Azure Edition on an Azure VM involves **no Azure Arc** — Arc is only for hotpatching machines outside Azure — and carries no licence premium. |
+| `availabilityZone` | `-1` (none) | A jump box is cattle; zone pinning buys nothing. |
+| `osDiskStorageAccountType` | `Premium_LRS` | |
+| `adminUsername` | `azureadmin` | |
+| `entraLogin` | `true` | |
+| `autoShutdown` | Enabled, `1800`, `Central Standard Time` | Windows time-zone ID, so Azure handles daylight saving and 18:00 stays 18:00 local all year. |
+| `bootstrap` | Enabled, the default package list | See below. |
+
+Hardening is not optional and not parameterised: Trusted Launch (secure boot + vTPM),
+`encryptionAtHost`, managed boot diagnostics, and `AutomaticByPlatform` patching and
+assessment. Hotpatching stays off — on Windows Server 2025 it is a separately-enrolled paid
+per-core subscription, and the Azure Edition image is used here for its patching support, not
+for hotpatch.
+
+`bypassPlatformSafetyChecksOnUserSchedule` is pinned to `false`. AVM defaults it to `true`,
+and when it is `true` Azure treats patching as customer-scheduled and installs nothing on its
+own. That is indistinguishable from working automatic patching right up until nothing has been
+patched.
+
+#### Signing in
+
+Entra ID, through Bastion. The AAD Login extension is installed and the VM gets a
+system-assigned managed identity.
+
+One manual step is required per person, because the deployment identity holds **Contributor
+only** and deliberately not `User Access Administrator`, so the template cannot create role
+assignments:
+
+```bash
+az role assignment create \
+  --role "Virtual Machine Administrator Login" \
+  --assignee <user-object-id-or-upn> \
+  --scope /subscriptions/<sub>/resourceGroups/RG-CONNECTIVITY-HUB-CUS
+```
+
+`Virtual Machine User Login` is the non-administrator equivalent.
+
+#### The local account, and break-glass
+
+There is a local administrator account, and **nobody knows its password, by design.** The
+password parameter defaults to a value built from `newGuid()`, so it is generated at
+deployment time, never printed, and never stored.
+
+This is a deliberate retreat from the original design, which kept the password in Key Vault.
+That is not possible here: the `MCAPSGovDeployPolicies` assignment forces
+`publicNetworkAccess: Disabled` on a vault and nulls its `networkAcls`, which breaks both
+hand-seeding a secret and ARM's deployment-time `getSecret()` reference. It is the same class
+of failure that removed OpenTofu from this repository. A vault was created, tested, and purged
+before this was settled — do not re-propose it without solving the policy problem first.
+
+If Entra sign-in is unavailable, reset the local account instead. This needs only Contributor:
+
+```bash
+az vm user update \
+  --resource-group RG-CONNECTIVITY-HUB-CUS \
+  --name vm-jb-cus-01 \
+  --username azureadmin \
+  --password '<a new strong password>'
+```
+
+Every deployment generates a **different** password and sends it in the VM PUT. This was
+verified against a real redeployment: Azure ignores the changed `adminPassword` on an existing
+VM, the deployment succeeds, and the account's actual password is unchanged. Practically, that
+means a redeploy does not quietly rotate the break-glass password out from under a reset.
+
+#### Bootstrap
+
+`infra/scripts/jumpbox-bootstrap.ps1` is embedded with `loadTextContent()` and run by a
+`Microsoft.Compute/virtualMachines/runCommands` child resource. It is a **documented
+raw-resource exception**: the AVM VM module exposes `extensionCustomScriptConfig` only, which
+wants the script staged in a storage account — blocked by the same policy that killed the
+vault. The run command takes the script inline, so nothing has to be staged anywhere.
+
+It installs Chocolatey, then the `packages` list, then the Bicep CLI via `az bicep install`
+and the Az PowerShell module from the PowerShell Gallery. Defaults: `azure-cli`, `git`, `gh`,
+`microsoft-windows-terminal`, `vscode`, `powershell-core`, `sqlserver-cmdlineutils`,
+`microsoft-edge`, `googlechrome`. Override `bootstrap.packages` to change the list.
+
+The script re-runs on every deployment and is written to be idempotent — Chocolatey is
+installed only when absent, and `choco upgrade` both installs a missing package and updates an
+existing one. Packages are installed one at a time on purpose: a single batched `choco upgrade`
+aborts on the first failure, which would mean one unavailable package costs every later tool.
+
+**Docker is deliberately absent.** Docker CE is a Linux product, the Windows Server runtime is
+Mirantis, and Docker Desktop needs Hyper-V with nested virtualisation. If Docker turns out to
+matter, the fix is a `vmSize` change in the parameter file to a size that supports nested
+virtualisation, not a template change.
 
 ### Runners subnet
 
@@ -300,6 +412,21 @@ hub module outputs: a variable loop cannot read module outputs (BCP182) and a fo
 cannot be nested inside `concat` (BCP138). The naming convention lives in one place,
 `hubVirtualNetworkName` in `types.bicep`, and the zone module takes an explicit `dependsOn`
 on the hubs because the dependency is no longer implied by a reference.
+
+Two quirks in `avm/res/compute/virtual-machine` `0.22.3` are worked around in
+`infra/modules/jumpbox.bicep`, both verified against real deployments:
+
+- The `managedIdentities` documentation claims the system-assigned identity is enabled
+  automatically when `extensionAadJoinConfig.enabled` is true. It is not. The whole `identity`
+  block is emitted only when `managedIdentities` is non-empty, so without it the VM deploys
+  with no identity at all while the AAD Login extension still reports `Succeeded` — Entra
+  sign-in then silently does not work. `managedIdentities: { systemAssigned: true }` is passed
+  explicitly.
+- `autoShutdownConfig.notificationSettings.status` is built from the **schedule** status, not
+  the notification status. Passing `notificationSettings: { status: 'Disabled' }` therefore
+  enables notifications with an empty recipient, and the deployment fails with
+  `MissingRequiredProperties: One of the following properties must be specified: webhookUrl,
+  emailRecipient.` The property is omitted entirely instead.
 
 ## Validation
 

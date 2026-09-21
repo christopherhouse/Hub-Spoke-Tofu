@@ -12,6 +12,7 @@ either is a parameter change, not a template change.
 | Shared Private Link DNS zone catalog | Implemented |
 | Hub VNet, subnets, NSGs and Azure Bastion Standard | Implemented |
 | NAT gateway on the jump box subnet | Implemented |
+| Windows jump boxes in the hub, Bastion-only, Entra sign-in | Implemented |
 | Container Apps runners subnet (delegated, environment not yet deployed) | Implemented |
 | Spoke VNets and bidirectional peering, across subscriptions | Implemented |
 | Dedicated NSG on every subnet, rules set from parameters | Implemented |
@@ -101,6 +102,32 @@ az deployment sub create `
 Do this **before pushing the branch**. Without it the pull request `what-if` job fails, not
 just the deploy. CI must never run this template: the identity cannot create itself, and
 granting rights to itself is exactly the permission it does not hold.
+
+### Subscription prerequisite: encryption at host
+
+Jump boxes set `encryptionAtHost: true`, which requires a one-time feature registration.
+Preflight fails without it, and `what-if` does not surface it:
+
+```powershell
+az feature register --namespace Microsoft.Compute --name EncryptionAtHost
+az feature show --namespace Microsoft.Compute --name EncryptionAtHost --query properties.state
+az provider register --namespace Microsoft.Compute
+```
+
+### Manual step: jump box sign-in
+
+Signing into a jump box with Entra ID needs a role assignment that this deployment cannot
+create, because the identity is Contributor and not User Access Administrator:
+
+```powershell
+az role assignment create `
+  --role "Virtual Machine Administrator Login" `
+  --assignee <user-object-id-or-upn> `
+  --scope /subscriptions/<sub>/resourceGroups/RG-CONNECTIVITY-HUB-CUS
+```
+
+See [`infra/README.md`](infra/README.md) for the jump box design, the break-glass path, and
+what the bootstrap installs.
 
 ### Commands
 

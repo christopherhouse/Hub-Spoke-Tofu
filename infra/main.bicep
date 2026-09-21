@@ -69,6 +69,7 @@ module hubNetworks 'modules/hub.bicep' = [
       jumpboxSubnet: hub.?jumpboxSubnet
       natGateway: hub.?natGateway
       runnersSubnet: hub.?runnersSubnet
+      jumpboxes: hub.?jumpboxes ?? []
       tags: hub.?tags ?? tags
       enableTelemetry: enableTelemetry
     }
@@ -215,6 +216,7 @@ output hubs array = [
     jumpboxSubnetResourceId: hubNetworks[index].outputs.jumpboxSubnetResourceId
     natGatewayResourceId: hubNetworks[index].outputs.natGatewayResourceId
     runnersSubnetResourceId: hubNetworks[index].outputs.runnersSubnetResourceId
+    jumpboxes: hubNetworks[index].outputs.jumpboxes
   }
 ]
 

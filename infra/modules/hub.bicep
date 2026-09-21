@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { hubBastionType, hubNatGatewayType, hubSubnetType, hubVirtualNetworkName, subnetNetworkSecurityGroupName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
+import { hubBastionType, hubNatGatewayType, hubSubnetType, jumpboxType, hubVirtualNetworkName, subnetNetworkSecurityGroupName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
 
 // Hub network for the hub-and-spoke topology.
 //
@@ -33,6 +33,9 @@ param natGateway hubNatGatewayType?
 @description('Optional. Subnet delegated to `Microsoft.App/environments` for the Container Apps environment that hosts self-hosted GitHub Actions runners. Omit to deploy the hub without one.')
 param runnersSubnet hubSubnetType?
 
+@description('Optional. Management jump boxes. Each lands in the jump box subnet with no public IP. Requires `jumpboxSubnet`.')
+param jumpboxes jumpboxType[] = []
+
 @description('Optional. Tags applied to every resource in the hub.')
 param tags object?
 
@@ -42,6 +45,11 @@ param enableTelemetry bool = true
 var bastionEnabled = bastion != null && (bastion.?enabled ?? true)
 var jumpboxEnabled = jumpboxSubnet != null && (jumpboxSubnet.?enabled ?? true)
 var runnersEnabled = runnersSubnet != null && (runnersSubnet.?enabled ?? true)
+
+// A jump box needs somewhere to land. Filtering here rather than failing means a hub can carry
+// jump box definitions before the subnet exists; the jump boxes simply do not deploy, and
+// infra/README.md states the requirement.
+var jumpboxesToDeploy = jumpboxEnabled ? filter(jumpboxes, jumpbox => jumpbox.?enabled ?? true) : []
 
 // The NAT gateway exists to give the jump box subnet a predictable outbound address, so it is
 // only deployed when that subnet is.
@@ -496,6 +504,50 @@ module bastionHost 'br/public:avm/res/network/bastion-host:0.8.2' = if (bastionE
   }
 }
 
+// One module per jump box, so adding a management host is a parameter change. Each lands in
+// the jump box subnet, which is created above with an NSG that admits RDP and SSH from
+// `AzureBastionSubnet` alone, and a NAT gateway for outbound.
+module jumpboxVirtualMachines 'jumpbox.bicep' = [
+  for jumpbox in jumpboxesToDeploy: {
+    // Deployment names are capped at 64 characters, and the jump box name is capped at 15.
+    name: 'deploy-jb-${uniqueString(name, jumpbox.name)}'
+    dependsOn: [
+      // The subnet resource ID below is composed, not read from the virtual network module,
+      // so nothing else orders the jump box behind the network that hosts it.
+      virtualNetwork
+    ]
+    params: {
+      name: jumpbox.name
+      location: location
+      subnetResourceId: resourceId(
+        'Microsoft.Network/virtualNetworks/subnets',
+        virtualNetworkName,
+        jumpboxSubnetName
+      )
+      adminUsername: jumpbox.?adminUsername ?? 'azureadmin'
+      vmSize: jumpbox.?vmSize ?? 'Standard_D4as_v7'
+      availabilityZone: jumpbox.?availabilityZone ?? -1
+      // Azure Edition, not `2025-datacenter-g2`: only an exact publisher/offer/SKU from the
+      // automatic guest patching supported image list can use `AutomaticByPlatform`, and the
+      // plain Generation 2 desktop SKU is not on it. See infra/modules/jumpbox.bicep.
+      image: jumpbox.?image ?? {
+        publisher: 'MicrosoftWindowsServer'
+        offer: 'WindowsServer'
+        sku: '2025-datacenter-azure-edition'
+        version: 'latest'
+      }
+      osDiskSizeGB: jumpbox.?osDiskSizeGB
+      osDiskStorageAccountType: jumpbox.?osDiskStorageAccountType ?? 'Premium_LRS'
+      entraLogin: jumpbox.?entraLogin ?? true
+      enableAcceleratedNetworking: jumpbox.?enableAcceleratedNetworking ?? false
+      autoShutdown: jumpbox.?autoShutdown ?? {}
+      bootstrap: jumpbox.?bootstrap ?? {}
+      tags: jumpbox.?tags ?? tags
+      enableTelemetry: enableTelemetry
+    }
+  }
+]
+
 @description('Resource ID of the hub virtual network.')
 output virtualNetworkResourceId string = virtualNetwork.outputs.resourceId
 
@@ -528,3 +580,13 @@ output runnersSubnetResourceId string = runnersEnabled
 
 @description('Resource ID of the NAT gateway attached to the jump box subnet, or an empty string when it is not deployed.')
 output natGatewayResourceId string = natGatewayEnabled ? natGatewayResource!.outputs.resourceId : ''
+
+@description('The jump boxes that were deployed, with the private IP address to connect to through Bastion.')
+output jumpboxes array = [
+  for (jumpbox, index) in jumpboxesToDeploy: {
+    name: jumpbox.name
+    resourceId: jumpboxVirtualMachines[index].outputs.resourceId
+    privateIPAddress: jumpboxVirtualMachines[index].outputs.privateIPAddress
+    systemAssignedMIPrincipalId: jumpboxVirtualMachines[index].outputs.systemAssignedMIPrincipalId
+  }
+]
