@@ -163,15 +163,15 @@ param containerAppsEnvironment = {
 
 // The GitHub App the runners authenticate as. `applicationId` is the App ID shown on the App
 // settings page and `installationId` identifies the App's single installation on the account;
-// neither is a secret. The private key is never set here: it is pasted into the Key Vault
-// secret named `github-app-private-key`, once, from the jump box. See infra/README.md.
+// neither is a secret. The private key is never set here: it lives in the Key Vault secret
+// named `github-app-private-key`, seeded once from the jump box. See infra/README.md.
 //
-// Leave this commented out until the App exists, otherwise the runner jobs deploy with an
-// application ID that cannot mint a token.
-// param githubApp = {
-//   applicationId: '123456'
-//   installationId: '98765432'
-// }
+// `installationId` does not change when repositories are added to or removed from the
+// installation, so onboarding repository N+1 never touches this block.
+param githubApp = {
+  applicationId: '5026676'
+  installationId: '163623366'
+}
 
 // One entry per repository. Onboarding repository N+1 is one entry here plus selecting it in
 // the App installation; nothing else changes, and `installationId` is not repeated because a
@@ -185,6 +185,12 @@ param containerAppsEnvironment = {
 // remove them.
 param githubRunners = [
   // BEGIN runners
+  {
+    repositoryOwner: 'christopherhouse'
+    repositoryName: 'Secure-Integration-Environment'
+    // The derived default would be truncated at 32 characters mid-word.
+    name: 'cj-secure-integration-env'
+  }
   // END runners
 ]
 
