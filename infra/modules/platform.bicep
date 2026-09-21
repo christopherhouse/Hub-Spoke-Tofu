@@ -59,6 +59,28 @@ param enableTelemetry bool = true
 var keyVaultEnabled = keyVault != null && (keyVault!.?enabled ?? true)
 var containerRegistryEnabled = containerRegistry != null && (containerRegistry!.?enabled ?? true)
 
+// Key Vault and container registry names share one namespace across every Azure tenant, so a
+// readable name such as `kv-platform-cus` is as likely as not already taken by a stranger.
+// Deriving a deterministic suffix keeps the name unique without making it a decision anyone has
+// to revisit: it is stable for a given subscription and platform stamp, so a redeployment never
+// renames a resource, while a second region or subscription gets its own. That matters more for
+// the vault than it looks - purge protection holds a deleted name for the soft-delete window, so
+// a collision is not something you can simply rename your way out of.
+var uniqueSuffix = take(uniqueString(subscription().id, name), 6)
+
+// Key Vault allows alphanumerics and hyphens, must start with a letter, must not contain two
+// consecutive hyphens, and is capped at 24 characters. Truncating a long platform name can leave
+// a trailing hyphen that would collide with the separator, so it is trimmed first.
+var keyVaultNameStem = take('kv-${name}', 24 - length(uniqueSuffix) - 1)
+var keyVaultNamePrefix = endsWith(keyVaultNameStem, '-')
+  ? take(keyVaultNameStem, length(keyVaultNameStem) - 1)
+  : keyVaultNameStem
+var keyVaultName = keyVault.?name ?? '${keyVaultNamePrefix}-${uniqueSuffix}'
+
+// Registry names are lowercase alphanumerics only - no hyphens at all - so the separator the
+// vault name uses is not available here and the platform name has its hyphens stripped.
+var containerRegistryName = containerRegistry.?name ?? toLower('acr${replace(name, '-', '')}${uniqueSuffix}')
+
 // Built-in role definition GUIDs. Data-plane reader roles only: the runner identity pulls an
 // image and reads one secret, and holds nothing that can write to either resource.
 var acrPullRoleDefinitionGuid = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
@@ -95,7 +117,7 @@ module runnerIdentity 'br/public:avm/res/managed-identity/user-assigned-identity
 module vault 'br/public:avm/res/key-vault/vault:0.14.2' = if (keyVaultEnabled) {
   name: 'kv-${name}'
   params: {
-    name: keyVault!.name
+    name: keyVaultName
     location: location
     sku: keyVault!.?skuName ?? 'standard'
     enableRbacAuthorization: true
@@ -114,7 +136,7 @@ module vault 'br/public:avm/res/key-vault/vault:0.14.2' = if (keyVaultEnabled) {
     }
     privateEndpoints: [
       {
-        name: 'pep-${keyVault!.name}'
+        name: 'pep-${keyVaultName}'
         service: 'vault'
         subnetResourceId: privateEndpointSubnetResourceId
         privateDnsZoneGroup: {
@@ -157,7 +179,7 @@ module vault 'br/public:avm/res/key-vault/vault:0.14.2' = if (keyVaultEnabled) {
 module registry 'br/public:avm/res/container-registry/registry:0.13.1' = if (containerRegistryEnabled) {
   name: 'cr-${name}'
   params: {
-    name: containerRegistry!.name
+    name: containerRegistryName
     location: location
     acrSku: 'Premium'
     acrAdminUserEnabled: false
@@ -180,11 +202,17 @@ module registry 'br/public:avm/res/container-registry/registry:0.13.1' = if (con
     retentionPolicyStatus: 'enabled'
     retentionPolicyDays: containerRegistry!.?untaggedManifestRetentionDays ?? 7
     softDeletePolicyStatus: 'disabled'
-    exportPolicyStatus: 'disabled'
+    // Export policy stays enabled, which is not a free choice: Azure rejects
+    // `exportPolicyStatus: 'disabled'` with DisableExport_PublicNetworkAccessMustBeDisabled
+    // unless public network access is also Disabled. Since ACR Tasks needs that public endpoint
+    // to build the very first runner image, the two are mutually exclusive. The network rules
+    // above are what actually restrict access; the export policy would only have stopped an
+    // already-authorized principal copying artifacts out.
+    exportPolicyStatus: 'enabled'
     zoneRedundancy: 'Disabled'
     privateEndpoints: [
       {
-        name: 'pep-${containerRegistry!.name}'
+        name: 'pep-${containerRegistryName}'
         service: 'registry'
         subnetResourceId: privateEndpointSubnetResourceId
         privateDnsZoneGroup: {

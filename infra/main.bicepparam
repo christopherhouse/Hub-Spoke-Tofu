@@ -117,8 +117,9 @@ param spokes = [
 ]
 
 // Shared platform services. `spokeName` supplies the subscription, resource group and region,
-// so none of them is restated. The Key Vault and registry names are globally unique across
-// Azure, which is why they are data rather than derived.
+// so none of them is restated. The Key Vault and registry names are left unset: both share one
+// namespace across every Azure tenant, so they are derived with a suffix computed from the
+// subscription and this stamp name rather than guessed at here.
 param platform = {
   name: 'platform-cus'
   spokeName: 'spoke-platform-cus'
@@ -129,11 +130,8 @@ param platform = {
     dataRetention: 30
     dailyQuotaGb: '1'
   }
-  keyVault: {
-    name: 'kv-platform-cus-hsiac'
-  }
+  keyVault: {}
   containerRegistry: {
-    name: 'acrplatformcushsiac'
     // `az acr build` runs on Microsoft-managed ACR Tasks compute outside the virtual network,
     // so a registry with public access fully disabled would reject the image build that has to
     // happen before any runner exists. These are the IPv4 prefixes of the

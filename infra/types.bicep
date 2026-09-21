@@ -393,10 +393,10 @@ type platformKeyVaultType = {
   @description('Optional. Deploy the vault. Defaults to `true`.')
   enabled: bool?
 
-  @description('Required. Name of the vault. Key Vault names are globally unique across Azure and limited to alphanumerics and hyphens, so this is supplied rather than derived.')
+  @description('Optional. Name of the vault. Defaults to `kv-<platform name>-<suffix>`, where the suffix is derived from the subscription and the platform stamp name. Key Vault names share a single namespace across every Azure tenant, so a readable name is usually already taken; the derived suffix makes one unique without it becoming a decision, and is stable across redeployments. Supply a name only to adopt a vault that already exists.')
   @minLength(3)
   @maxLength(24)
-  name: string
+  name: string?
 
   @description('Optional. SKU. Defaults to `standard`. `premium` only adds HSM-backed keys, which nothing here uses.')
   skuName: ('standard' | 'premium')?
@@ -413,10 +413,10 @@ type platformContainerRegistryType = {
   @description('Optional. Deploy the registry. Defaults to `true`.')
   enabled: bool?
 
-  @description('Required. Name of the registry. Registry names are globally unique across Azure and limited to lowercase alphanumerics, so this is supplied rather than derived.')
+  @description('Optional. Name of the registry. Defaults to `acr<platform name><suffix>`, with hyphens stripped because registry names allow lowercase alphanumerics only, and the same derived suffix the Key Vault uses. Registry names share a single namespace across every Azure tenant. Supply a name only to adopt a registry that already exists.')
   @minLength(5)
   @maxLength(50)
-  name: string
+  name: string?
 
   @description('Optional. Public IP ranges allowed to reach the registry data plane, in CIDR notation. This exists for one reason: `az acr build` runs on Microsoft-managed ACR Tasks compute outside the virtual network, and a registry with public network access fully disabled rejects it. Supply the IPv4 prefixes of the `AzureContainerRegistry.<region>` service tag. Everything else is denied, and runners pull over the private endpoint. See infra/README.md for the refresh command.')
   allowedPublicIpRanges: string[]?

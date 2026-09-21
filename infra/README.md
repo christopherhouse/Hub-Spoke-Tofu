@@ -441,6 +441,29 @@ the three things everything else in the repository depends on:
 restated. A name that matches no spoke fails with a null-reference error, the same way
 `spoke.hubName` does.
 
+### Why the vault and registry names are derived
+
+Key Vault and container registry names share **one namespace across every Azure tenant**, so a
+readable name like `kv-platform-cus` is as likely as not already taken by a stranger — when this
+was written, that exact vault name was free and `acrplatformcus` was not.
+
+Both names are therefore derived rather than chosen:
+
+| Resource | Pattern | Constraint being satisfied |
+|---|---|---|
+| Key Vault | `kv-<platform name>-<suffix>` | ≤ 24 chars, alphanumerics and hyphens, no `--` |
+| Registry | `acr<platform name><suffix>` | ≤ 50 chars, lowercase alphanumerics only, no hyphens |
+
+The suffix is `take(uniqueString(subscription().id, platform.name), 6)`. It is stable for a given
+subscription and platform stamp, so redeploying never renames a resource, while a second region
+or subscription gets its own name with no parameter change. This matters more for the vault than
+it first appears: purge protection holds a deleted name for the whole soft-delete window, so a
+collision is not something a rename gets you out of.
+
+Setting `keyVault.name` or `containerRegistry.name` overrides the derivation, which is there for
+adopting a resource that already exists. Read the names Azure actually assigned from the
+`platform` deployment output rather than reconstructing them by hand.
+
 ### Why the workspace is a separate module
 
 `modules/log-analytics.bicep` exists only because of deployment ordering, and splitting it out
@@ -476,8 +499,30 @@ az network list-service-tags --location centralus `
   --query "values[?name=='AzureContainerRegistry.CentralUS'].properties.addressPrefixes | [0]"
 ```
 
+That allow list is load-bearing rather than belt-and-braces. `networkRuleBypassAllowedForTasks`
+is set by the template, but the platform **silently drops it** — it reads back as `null` after a
+successful deployment, with no error. The IP prefixes are what actually admit ACR Tasks today.
+Verify with:
+
+```powershell
+az resource show --ids <registry resource ID> --api-version 2025-04-01 `
+  --query "properties.networkRuleBypassAllowedForTasks"
+```
+
+### Why exports are not disabled
+
+`exportPolicyStatus` stays `enabled`. Azure rejects disabling it with
+`DisableExport_PublicNetworkAccessMustBeDisabled` unless `publicNetworkAccess` is also
+`Disabled`, and the section above is the reason that is not an option. The two settings are
+mutually exclusive, so the choice is between disabled exports and a buildable first image.
+
+This is a narrow loss. The network rules are what restrict who can reach the registry at all;
+the export policy would only have stopped an already-authorized principal copying artifacts out.
+The VNet-injected agent pool follow-up below would let both be tightened together.
+
 **Hardening follow-up:** a dedicated VNet-injected ACR Tasks agent pool would remove the public
-allow list entirely. It is a Premium feature and a separate piece of work.
+allow list entirely, and with it the export-policy compromise. It is a Premium feature and a
+separate piece of work.
 
 ## Diagnostics
 
@@ -580,11 +625,17 @@ Two, once:
    private repositories that should get runners. Put the App ID and the installation ID into
    `githubApp` in `main.bicepparam`; neither is a secret.
 2. **Paste the private key into Key Vault**, from the jump box over Bastion. The vault is
-   private-endpoint-only, so neither a laptop nor the `ubuntu-latest` CD runner can reach it:
+   private-endpoint-only, so neither a laptop nor the `ubuntu-latest` CD runner can reach it.
+
+   The vault name is derived, not chosen, so read it from the deployment rather than guessing:
 
    ```powershell
+   $vault = az deployment sub show `
+     --name <deployment name> `
+     --query properties.outputs.platform.value.keyVaultName -o tsv
+
    az keyvault secret set `
-     --vault-name kv-platform-cus-hsiac `
+     --vault-name $vault `
      --name github-app-private-key `
      --file .\app-private-key.pem
    ```

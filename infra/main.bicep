@@ -296,12 +296,17 @@ module platformServices 'modules/platform.bicep' = if (platformEnabled) {
     name: platform!.name
     location: platformLocation
     privateEndpointSubnetResourceId: platformPrivateEndpointSubnetResourceId
+    // The subscription is passed explicitly. The three-argument `resourceId(group, type, name)`
+    // overload is ambiguous in ARM - it reads the first argument as a subscription ID and fails
+    // with "is not valid subscription identifier" - and Bicep does not catch it at build time.
     keyVaultPrivateDnsZoneResourceId: resourceId(
+      subscription().subscriptionId,
       dnsResourceGroupName,
       'Microsoft.Network/privateDnsZones',
       'privatelink.vaultcore.azure.net'
     )
     containerRegistryPrivateDnsZoneResourceId: resourceId(
+      subscription().subscriptionId,
       dnsResourceGroupName,
       'Microsoft.Network/privateDnsZones',
       'privatelink.azurecr.io'

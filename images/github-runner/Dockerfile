@@ -36,6 +36,7 @@ ARG NODE_MAJOR=22
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
+    HOME=/home/runner \
     RUNNER_MANUALLY_TRAP_SIG=1 \
     ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=1 \
     AZURE_CONFIG_DIR=/home/runner/.azure \
@@ -136,6 +137,11 @@ USER runner
 # AZURE_CONFIG_DIR, so a copy under /root would be invisible at run time. Going through the
 # Azure CLI rather than downloading Bicep separately means `az bicep` and a bare `bicep` call
 # cannot end up on different versions.
+#
+# HOME is pinned in the ENV block above for the same reason: the Bicep CLI is a self-extracting
+# .NET single-file binary and fails outright with "Failure processing application bundle" if
+# HOME points somewhere it cannot write. A host that overrides HOME would otherwise break
+# `az bicep` at run time only, long after this build succeeded.
 RUN az config set core.collect_telemetry=false --only-show-errors \
     && az bicep install \
     && az bicep version
