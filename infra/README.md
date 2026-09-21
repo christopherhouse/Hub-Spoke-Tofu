@@ -651,29 +651,76 @@ schedule is load-bearing, not housekeeping.
 
 ### Manual steps
 
-Two, once:
+One click, once.
 
-1. **Create the GitHub App** on the account, with repository permissions *Actions: read*,
-   *Administration: read and write* and *Metadata: read*, webhooks disabled. Install it on the
-   private repositories that should get runners. Put the App ID and the installation ID into
-   `githubApp` in `main.bicepparam`; neither is a secret.
-2. **Paste the private key into Key Vault**, from the jump box over Bastion. The vault is
-   private-endpoint-only, so neither a laptop nor the `ubuntu-latest` CD runner can reach it.
+1. **Create the GitHub App** by running `.github/scripts/create_github_app.py`. It uses GitHub's
+   [App manifest flow](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest):
+   it serves a local page that posts a prefilled manifest to GitHub, so the permissions
+   (*Actions: read*, *Administration: write*, *Metadata: read*) and the disabled webhook are
+   already set and there is no form to fill in. The only interaction is clicking **Create
+   GitHub App**.
 
-   The vault name is derived, not chosen, so read it from the deployment rather than guessing:
+   Do not register the App by hand through *Settings → Developer settings → New GitHub App*.
+   That form demands a callback URL and does not expose the webhook *Active* checkbox in the
+   same way, and it makes you download and handle the private key yourself.
 
-   ```powershell
-   $vault = az deployment sub show `
-     --name <deployment name> `
-     --query properties.outputs.platform.value.keyVaultName -o tsv
+   The script catches GitHub's redirect and exchanges the temporary code at
+   `POST /app-manifests/{code}/conversions`, which returns the App ID **and** the generated
+   private key. Pass `--key-vault` to write the key straight into Key Vault; otherwise it is
+   written to a local file that must be seeded into the vault and then deleted.
 
-   az keyvault secret set `
-     --vault-name $vault `
-     --name github-app-private-key `
-     --file .\app-private-key.pem
-   ```
+2. **Install the App** on the private repositories that should get runners, via
+   `https://github.com/apps/<app-slug>/installations/new`. Choose *Only select repositories*,
+   never *All repositories*: the App holds `Administration: write`.
+
+Put the App ID and the installation ID into `githubApp` in `main.bicepparam`; neither is a
+secret.
+
+#### Seeding the private key into the vault
+
+The vault is private-endpoint-only, so neither a laptop nor the `ubuntu-latest` CD runner can
+reach it. The jump box can, and it does not need an interactive Bastion session to be used: its
+system-assigned identity plus `az vm run-command` reaches it through the Azure control plane.
+Grant that identity `Key Vault Secrets Officer` on the vault once, then run a script on the VM
+that takes a token from IMDS and `PUT`s the secret over the Key Vault REST API.
+
+Set the secret metadata at the same time, because it does not default to anything useful:
+
+| Attribute | Value | Why |
+|---|---|---|
+| `contentType` | `application/x-pem-file` | The key is PKCS#1 PEM, not an opaque string. |
+| `exp` | one year out | Drives `SecretNearExpiry` Event Grid events and shows the rotation date in the portal. |
+| tags | `purpose`, `app`, `appId`, `rotateBy` | Ties the secret back to the App that issued it. |
+
+An expiry is safe to set here. Key Vault documents that `exp` is informational for secrets and
+that a **get** "works for not-yet-valid and expired secrets, outside the *nbf* / *exp* window",
+so an expired key still resolves rather than silently breaking every runner. It is a rotation
+signal, not an enforcement mechanism. Do not set `enabled: false`, which *does* block reads.
+
+Delete any local copy of the PEM afterwards, and verify the round-trip first — compare a
+SHA256 of the local file against a hash computed on the value read back out of the vault.
 
 Once a runner exists, rotation can run on a `runs-on: self-hosted` workflow instead.
+
+### Onboarding the next repository
+
+Adding repository N+1 does not mean a new App, a new key, or a new installation.
+
+A GitHub App has **one installation per account**, and that installation's repository access is
+editable at any time: *Settings → Applications → Installed GitHub Apps → Configure → Repository
+access*. The installation ID is a property of the installation, not of the repositories inside
+it, so it does not change when the repository list does.
+
+So onboarding is:
+
+1. Tick the new repository in the App installation's repository access list.
+2. Add an entry to `githubRunners` in `main.bicepparam` between the `// BEGIN runners` and
+   `// END runners` markers, or run the `onboard-runner.yml` workflow, which edits that block
+   for you and refuses public repositories.
+
+`githubApp.applicationId`, `githubApp.installationId` and the vault secret all stay as they
+are. One key covers every repository the App is installed on, which is the reason this uses an
+App rather than N personal access tokens.
 
 ## Known gaps
 
