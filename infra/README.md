@@ -9,6 +9,7 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `types.bicep` | Shared user-defined types (`hubType` and friends), surfaced with `@export()`. |
 | `zones.bicep` | Curated Private Link DNS zone catalog, surfaced with `@export()`. |
 | `modules/hub.bicep` | Hub virtual network, subnets, NSGs, Azure Bastion and the jump box NAT gateway. Resource-group scope. |
+| `modules/spoke.bicep` | Spoke virtual network, subnets, per-subnet NSGs and bidirectional peering to its hub. Resource-group scope. |
 
 ## Modules
 
@@ -32,6 +33,7 @@ composed from AVM resource modules instead.
 | `dnsResourceGroupName` | Yes | Resource group that holds the shared zones. |
 | `location` | Yes | Resource group location, and the region substituted into regional zone names. |
 | `hubs` | No | `hubType[]`. One entry per hub. Each gets a resource group, VNet, subnets and Bastion, and is linked to every zone. |
+| `spokes` | No | `spokeType[]`. One entry per spoke. Each gets a resource group, VNet, subnets, a peering to its hub, and links to every zone. |
 | `virtualNetworkLinks` | No | Extra VNets to link, beyond the hubs, which are linked automatically. |
 | `additionalPrivateLinkPrivateDnsZonesToInclude` | No | Extra zones beyond the curated catalog. |
 | `tags` | No | Applied to the resource group and every zone. Hubs may override with their own `tags`. |
@@ -55,6 +57,9 @@ Each hub produces:
 
 ### Address plan
 
+`10.0.0.0/16` is reserved for hubs, one `/19` each. `10.1.0.0/16` onward is for spokes, one
+`/20` each.
+
 Hub 1 is `10.0.0.0/19` (10.0.0.0 – 10.0.31.255).
 
 | Subnet | Prefix | Notes |
@@ -65,8 +70,16 @@ Hub 1 is `10.0.0.0/19` (10.0.0.0 – 10.0.31.255).
 | `snet-runners` | `10.0.0.128/26` | Delegated to `Microsoft.App/environments`. |
 | *(reserved)* | `10.0.0.192` – `10.0.31.255` | Firewall, gateway, DNS resolver, shared services. |
 
-Subsequent hubs take the next /19. Hub and spoke ranges must not overlap; that invariant is
-documented, not enforced in code.
+Spoke 1 is `10.1.0.0/20` (10.1.0.0 – 10.1.15.255).
+
+| Subnet | Prefix | Notes |
+|---|---|---|
+| `snet-workload` | `10.1.0.0/24` | |
+| `snet-privateendpoints` | `10.1.1.0/24` | `allowBastionAccess: false` — hosts no virtual machines. |
+| *(free)* | `10.1.2.0` – `10.1.15.255` | |
+
+Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges
+must not overlap; that invariant is documented, not enforced in code.
 
 ### Bastion
 
@@ -118,6 +131,130 @@ and the GitHub runner registration are **not** deployed by this repository yet.
   from the internet.
 - `privatelink.centralus.azurecontainerapps.io` is already in the zone catalog and linked to
   the hub, so an internal environment reached through a private endpoint resolves correctly.
+
+## Spokes
+
+A spoke is data, exactly like a hub. Each entry in `spokes` produces:
+
+- a resource group,
+- `vnet-<spoke name>` with the subnets supplied in `subnets`,
+- one network security group per subnet,
+- a **bidirectional** peering with the hub named in `hubName`,
+- a link from the spoke VNet to every Private DNS zone, with registration disabled.
+
+`hubName` must match the `name` of an entry in `hubs`. Each spoke references exactly one hub.
+A name that matches nothing fails with a null-reference error rather than a helpful message:
+Bicep's `assert` is still experimental, so the invariant is documented rather than enforced.
+
+Spoke subnets are a generic list, not named roles like the hub's. A spoke is a workload
+landing zone, so its subnets are not knowable in advance.
+
+### Peering
+
+The AVM virtual network module creates **both** directions when `remotePeeringEnabled` is set,
+and derives the remote subscription and resource group by splitting the remote VNet resource
+ID. That is what makes cross-subscription peering a parameter change rather than a structural
+one — no provider plumbing, only RBAC on both sides.
+
+| Setting | Default | Why |
+|---|---|---|
+| `allowVirtualNetworkAccess` | `true` | The point of the peering. |
+| `allowForwardedTraffic` | `true` | Needed once a hub firewall forwards traffic. Inert until then, and enabling it up front avoids re-peering later. |
+| `allowGatewayTransit` | `false` | No hub gateway exists yet. |
+| `useRemoteGateways` | `false` | Setting this before the hub has a VPN or ExpressRoute gateway fails the peering outright. |
+
+When a hub gateway is added, set `peering.useRemoteGateways` and `peering.allowHubGatewayTransit`
+together on the spoke — one configures each end.
+
+Peering is **not transitive**. Spoke-to-spoke traffic needs a hub firewall or route tables,
+both of which this design keeps optional.
+
+### Spokes in another subscription
+
+`subscriptionId` places a spoke in another subscription of the same tenant. The deployment
+identity needs Contributor there, and **cannot grant it to itself** — it is deliberately not
+User Access Administrator. Add the subscription to `targetSubscriptionIds` in
+`bootstrap/main.bicepparam` and redeploy the bootstrap root by hand *before* pushing the
+branch, or the pull request `what-if` job fails, not just the deploy.
+
+## Network security groups
+
+**Every subnet gets its own NSG**, hub and spoke, whether or not it carries custom rules.
+Adding a rule later is then a parameter change rather than new infrastructure plus a subnet
+re-association.
+
+The baseline is deliberately **empty**. The Azure platform default rules already deny inbound
+from the internet and allow VNet-to-VNet; restating them would be maintenance with no benefit
+and a risk of drifting from the platform.
+
+### Adding rules
+
+Rules are set per subnet in `main.bicepparam`. No template change is needed:
+
+```bicep
+subnets: [
+  {
+    name: 'snet-workload'
+    addressPrefix: '10.1.0.0/24'
+    securityRules: [
+      {
+        name: 'AllowHttpsFromHub'
+        properties: {
+          description: 'Workload API reachable from the hub only.'
+          access: 'Allow'
+          direction: 'Inbound'
+          priority: 200
+          protocol: 'Tcp'
+          sourceAddressPrefix: '10.0.0.0/19'
+          sourcePortRange: '*'
+          destinationAddressPrefix: '10.1.0.0/24'
+          destinationPortRange: '443'
+        }
+      }
+    ]
+  }
+]
+```
+
+The rule shape is not a free-form object. `types.bicep` re-exports `securityRuleType` from the
+AVM network security group module, so a malformed rule fails at `az bicep build-params` rather
+than at deployment.
+
+### Reserved priorities
+
+Caller rules are **appended** to the generated ones, never substituted for them — a rule that
+displaced the Bastion set or the Container Apps outbound set would break connectivity
+silently. A priority collision is an Azure deployment error, not a build error, so keep to
+these ranges:
+
+| Subnet | Generated | Use for caller rules |
+|---|---|---|
+| Spoke subnets | 100 (Bastion RDP/SSH, unless `allowBastionAccess: false`) | 200+ |
+| `snet-jumpbox` | 100 (Bastion RDP/SSH) | 200+ |
+| `snet-runners` | 100–200 (Container Apps outbound) | 300+ |
+| `AzureBastionSubnet` | 120–150 (required Bastion set) | 300+ |
+
+A rule `description` must be **140 characters or fewer**. `az bicep build` does not catch
+this; Azure rejects it at preflight with `SecurityRuleDescriptionTooLong`.
+
+### Private endpoint network policies
+
+`privateEndpointNetworkPolicies` controls whether a subnet's NSG and route table apply to
+private endpoints *in that subnet*. Every subnet sends it **explicitly**, defaulting to
+`Disabled` via `defaultPrivateEndpointNetworkPolicies` in `types.bicep`.
+
+Leaving it unset is what causes drift. Recent subnet API versions changed the Azure Resource
+Manager default from `Disabled` to `Enabled`, while the documented default and every subnet
+created before the change are `Disabled`. A template that omits the property therefore reports
+a permanent `Disabled => Enabled` difference in `what-if` against existing subnets, and the
+value a new subnet lands on depends on which AVM version happens to be pinned. The AVM virtual
+network module passes the property straight through as `null` when it is not supplied, so it
+does not shield callers from this. Sending a value explicitly removes both problems.
+
+Set `privateEndpointNetworkPolicies: 'Enabled'` on a subnet that hosts private endpoints and
+whose NSG or route table must filter or redirect traffic to them — for example to force
+private endpoint traffic through a firewall. This is not a policy-driven setting; no Azure
+Policy in this tenant modifies it.
 
 ## Zone catalog
 

@@ -42,6 +42,45 @@ param hubs = [
   }
 ]
 
+// Spokes. Each entry gets its own resource group, virtual network and subnets, peers
+// bidirectionally with the hub named in `hubName`, and is linked to every Private DNS zone.
+// Every subnet gets a dedicated NSG with no custom rules; add `securityRules` to a subnet to
+// extend it, using priority 200 or above so it cannot collide with the generated Bastion rule
+// at 100.
+//
+// Address plan: 10.0.0.0/16 is hubs, one /19 each. 10.1.0.0/16 onward is spokes, one /20
+// each. Spoke 1 is 10.1.0.0/20 (10.1.0.0 - 10.1.15.255):
+//   10.1.0.0/24    snet-workload
+//   10.1.1.0/24    snet-privateendpoints
+//   10.1.2.0 - 10.1.15.255   free
+param spokes = [
+  {
+    name: 'spoke-app-cus'
+    hubName: 'hub-cus'
+    location: 'centralus'
+    // ME-MngEnvMCAP758145-chhouse-2. The deployment identity holds Contributor here because
+    // the subscription is listed in targetSubscriptionIds in infra/bootstrap/main.bicepparam.
+    subscriptionId: '8043efb5-d046-4aac-abcd-2c1a00e5ab86'
+    resourceGroupName: 'RG-WORKLOAD-APP-CUS'
+    addressPrefixes: [
+      '10.1.0.0/20'
+    ]
+    subnets: [
+      {
+        name: 'snet-workload'
+        addressPrefix: '10.1.0.0/24'
+      }
+      {
+        // Hosts no virtual machines, so the Bastion RDP and SSH rule would be dead weight.
+        name: 'snet-privateendpoints'
+        addressPrefix: '10.1.1.0/24'
+        allowBastionAccess: false
+        privateEndpointNetworkPolicies: 'Disabled'
+      }
+    ]
+  }
+]
+
 // Extra virtual networks to link to every zone, beyond the hubs above, which are linked
 // automatically. Each entry is an object: { virtualNetworkResourceId: '<vnet resource id>' }
 param virtualNetworkLinks = []

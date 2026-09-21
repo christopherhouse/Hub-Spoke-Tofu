@@ -13,7 +13,8 @@ either is a parameter change, not a template change.
 | Hub VNet, subnets, NSGs and Azure Bastion Standard | Implemented |
 | NAT gateway on the jump box subnet | Implemented |
 | Container Apps runners subnet (delegated, environment not yet deployed) | Implemented |
-| Spoke VNets and peering | Planned |
+| Spoke VNets and bidirectional peering, across subscriptions | Implemented |
+| Dedicated NSG on every subnet, rules set from parameters | Implemented |
 | GitHub Actions deploy workflow | Implemented |
 | CI/CD deployment identity (OIDC, no secrets) | Implemented |
 
@@ -26,10 +27,13 @@ infra/
   types.bicep        shared user-defined types, e.g. hubType (@export)
   zones.bicep        curated Private Link DNS zone catalog (@export)
   bootstrap/
-    main.bicep       deployment identity, deployed by hand, never by CI
+    main.bicep       deployment identity and its RBAC, deployed by hand, never by CI
     main.bicepparam
+    modules/
+      subscription-contributor.bicep   Contributor for the identity on one subscription
   modules/
     hub.bicep        hub VNet, subnets, NSGs, Azure Bastion and the jump box NAT gateway
+    spoke.bicep      spoke VNet, subnets, per-subnet NSGs and peering to its hub
   README.md
 bicepconfig.json     Bicep linter configuration
 .github/
@@ -74,6 +78,29 @@ az provider register --namespace Microsoft.Network
 
 The provider re-registration is required to propagate the change. `what-if` does **not**
 surface this, because the check happens when the resource is actually created.
+
+### Subscription prerequisite: RBAC for a new subscription
+
+The workflow deploys as `id-hub-spoke-iac-cicd`, which holds Contributor only on the
+subscriptions listed in `infra/bootstrap/main.bicepparam`. Placing a hub or spoke in a new
+subscription therefore needs one manual step first — the identity is deliberately **not**
+User Access Administrator, so it cannot grant itself access.
+
+1. Add the subscription ID to `targetSubscriptionIds` in `infra/bootstrap/main.bicepparam`.
+2. Redeploy the bootstrap root **by hand**, from an account with Owner or User Access
+   Administrator on that subscription:
+
+```powershell
+az deployment sub create `
+  --name bootstrap `
+  --location centralus `
+  --template-file infra/bootstrap/main.bicep `
+  --parameters infra/bootstrap/main.bicepparam
+```
+
+Do this **before pushing the branch**. Without it the pull request `what-if` job fails, not
+just the deploy. CI must never run this template: the identity cannot create itself, and
+granting rights to itself is exactly the permission it does not hold.
 
 ### Commands
 

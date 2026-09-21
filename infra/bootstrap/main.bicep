@@ -1,10 +1,16 @@
 targetScope = 'subscription'
 
-// Bootstrap root. Creates the identity that GitHub Actions uses to deploy infra/main.bicep.
+// Bootstrap root. Creates the identity that GitHub Actions uses to deploy infra/main.bicep,
+// and grants it Contributor on every subscription that hubs and spokes target.
 //
-// This is deployed ONCE, BY HAND. CI must never deploy it: the deployment identity cannot
-// create itself. The pull request workflow builds this template so it cannot rot, but only
+// This is deployed ONCE, BY HAND, and again whenever `targetSubscriptionIds` changes. CI must
+// never deploy it: the deployment identity cannot create itself, and it is deliberately not
+// User Access Administrator, so it cannot grant itself access to a new subscription either.
+// The pull request workflow builds this template so it cannot rot, but only
 // infra/main.bicepparam is ever deployed by the workflow.
+//
+// Deploying it requires Owner or User Access Administrator on every subscription listed in
+// `targetSubscriptionIds`, not just on the one below.
 //
 //   az deployment sub create \
 //     --name bootstrap \
@@ -42,6 +48,9 @@ param githubRepository string
 @minValue(1)
 param githubRepositoryId int
 
+@description('Optional. Additional subscriptions the deployment identity may deploy into, for hubs and spokes outside the subscription this template is deployed to. Contributor is assigned on each. The subscription this template targets is always granted and does not need listing. Adding a subscription here is the supported way to onboard one: the identity is deliberately not User Access Administrator, so it cannot grant itself access.')
+param targetSubscriptionIds string[] = []
+
 @description('Optional. Name of the GitHub Environment the deploy job gates on. There is a single environment; the repository has no dev/test/prod split.')
 @minLength(1)
 param githubEnvironmentName string = 'azure'
@@ -57,11 +66,14 @@ param tags object?
 param enableTelemetry bool = true
 
 // Contributor. Sufficient for everything infra/main.bicep creates: resource groups, virtual
-// networks, NSGs, Bastion, public IPs, and Private DNS zones with links. The templates create
-// no role assignments, so User Access Administrator is deliberately NOT granted.
+// networks, NSGs, Bastion, public IPs, NAT gateways, peerings, and Private DNS zones with
+// links. The templates create no role assignments, so User Access Administrator is
+// deliberately NOT granted.
+var contributorRoleDefinitionGuid = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+
 var contributorRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
-  'b24988ac-6180-42a0-ab88-20f7382dd24c'
+  contributorRoleDefinitionGuid
 )
 
 // Immutable subject prefix. This repository has `use_immutable_subject` enabled, so the token
@@ -168,6 +180,31 @@ resource deploymentIdentityContributor 'Microsoft.Authorization/roleAssignments@
   }
 }
 
+// Contributor on every other subscription a hub or spoke targets. Onboarding a subscription
+// is a parameter change here, mirroring how infra/main.bicep treats subscriptions as data.
+//
+// The subscription this template is deployed to is filtered out: deploymentIdentityContributor
+// above already covers it, and the assignment name is a deterministic guid of the same scope,
+// identity and role, so listing it would put two resources with an identical name in one
+// deployment - an error, not an idempotent no-op. union() removes duplicate entries for the
+// same reason.
+var additionalTargetSubscriptionIds = filter(
+  union(targetSubscriptionIds, []),
+  id => id != subscription().subscriptionId
+)
+
+module targetSubscriptionContributor 'modules/subscription-contributor.bicep' = [
+  for targetSubscriptionId in additionalTargetSubscriptionIds: {
+    name: 'deploy-cicd-rbac-${uniqueString(targetSubscriptionId)}'
+    scope: subscription(targetSubscriptionId)
+    params: {
+      principalId: deploymentIdentity.outputs.principalId
+      identityResourceId: deploymentIdentityResourceIdValue
+      roleDefinitionGuid: contributorRoleDefinitionGuid
+    }
+  }
+]
+
 @description('Value for the AZURE_CLIENT_ID GitHub repository variable. This is the client ID, not the principal ID.')
 output deploymentIdentityClientId string = deploymentIdentity.outputs.clientId
 
@@ -182,6 +219,14 @@ output tenantId string = tenant().tenantId
 
 @description('Value for the AZURE_SUBSCRIPTION_ID GitHub repository variable.')
 output subscriptionId string = subscription().subscriptionId
+
+@description('Every subscription the deployment identity holds Contributor on. A hub or spoke placed outside these cannot be deployed by the workflow.')
+output grantedSubscriptionIds string[] = union(
+  [
+    subscription().subscriptionId
+  ],
+  additionalTargetSubscriptionIds
+)
 
 @description('The OIDC subjects trusted by the identity. Useful for confirming what the workflow can present.')
 output federatedCredentialSubjects string[] = [

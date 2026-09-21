@@ -1,12 +1,48 @@
 // Shared user-defined types for the hub-and-spoke topology.
 //
-// Topology is data: every hub is an entry in the `hubs` parameter of infra/main.bicep, so
-// adding a hub - in another region, resource group, or subscription - is a parameter change
-// rather than a template change.
+// Topology is data: every hub is an entry in the `hubs` parameter of infra/main.bicep, and
+// every spoke an entry in `spokes`, so adding either - in another region, resource group, or
+// subscription - is a parameter change rather than a template change.
+
+// Re-exported so every subnet type shares one strongly typed rule shape and the NSG module
+// version is pinned in a single place. Callers get IntelliSense and compile-time validation
+// of security rules written in a .bicepparam file, instead of an untyped array whose mistakes
+// only surface at deployment.
+import { securityRuleType } from 'br/public:avm/res/network/network-security-group:0.5.3'
+
+@export()
+@description('Optional. An NSG security rule. Re-exported from the Azure Verified Module so hub and spoke subnets share one definition.')
+type subnetSecurityRuleType = securityRuleType
+
+@export()
+@description('Optional. Whether NSGs and route tables apply to private endpoints in a subnet.')
+type subnetPrivateEndpointNetworkPoliciesType =
+  | 'Disabled'
+  | 'Enabled'
+  | 'NetworkSecurityGroupEnabled'
+  | 'RouteTableEnabled'
+
+// Always sent explicitly, never left to the Azure Resource Manager default. Recent subnet API
+// versions changed that default from `Disabled` to `Enabled`, so a template that omits the
+// property produces a permanent what-if difference against any subnet created before the
+// change, and its value silently depends on the module version in use. `Disabled` matches
+// both the documented ARM default and the deployed subnets. See infra/README.md.
+@export()
+@description('Optional. Default private endpoint network policies applied to every subnet that does not override it.')
+var defaultPrivateEndpointNetworkPolicies = 'Disabled'
 
 @export()
 @description('Returns the virtual network name a hub of the given name deploys. Single source of the convention, so callers can build a hub virtual network resource ID without reading the hub module outputs.')
 func hubVirtualNetworkName(hubName string) string => 'vnet-${hubName}'
+
+@export()
+@description('Returns the virtual network name a spoke of the given name deploys. Single source of the convention, so callers can build a spoke virtual network resource ID without reading the spoke module outputs.')
+func spokeVirtualNetworkName(spokeName string) string => 'vnet-${spokeName}'
+
+@export()
+@description('Returns the name of the network security group attached to a subnet. Every subnet gets its own, so rules can be added later without adding infrastructure. The suffix is a short purpose label: hub subnets pass `bastion`, `jumpbox` or `runners`, and spoke subnets pass the subnet name, whose purpose is already in it. Azure limits the name to 80 characters.')
+func subnetNetworkSecurityGroupName(virtualNetworkName string, suffix string) string =>
+  'nsg-${virtualNetworkName}-${suffix}'
 
 @export()
 @description('Optional. Azure Bastion configuration for a hub. Bastion Standard is used so that the host can reach virtual machines in peered spokes; the Developer SKU cannot peer.')
@@ -33,6 +69,12 @@ type hubBastionType = {
   @minValue(2)
   @maxValue(50)
   scaleUnits: int?
+
+  @description('Optional. Extra security rules appended to the `AzureBastionSubnet` NSG. The required Azure Bastion rule set is always present and is never replaced; removing any of it breaks connectivity and blocks platform updates. Generated rules occupy priorities 120-150, so use 300 or above.')
+  securityRules: subnetSecurityRuleType[]?
+
+  @description('Optional. Private endpoint network policies for the `AzureBastionSubnet`. Defaults to `Disabled`. The subnet is dedicated to Bastion and hosts no private endpoints, so this only exists to keep the value explicit.')
+  privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
 }
 
 @export()
@@ -78,6 +120,12 @@ type hubSubnetType = {
   @description('Required. Address prefix for the subnet, in CIDR notation.')
   @minLength(9)
   addressPrefix: string
+
+  @description('Optional. Extra security rules appended to this subnet\'s NSG. Every subnet gets its own NSG, so rules can be added here without any template change. The rules generated for the subnet are always kept; see the reserved priority ranges in infra/README.md.')
+  securityRules: subnetSecurityRuleType[]?
+
+  @description('Optional. Private endpoint network policies for the subnet. Defaults to `Disabled`. Set `Enabled` on a subnet that hosts private endpoints and whose NSG or route table must apply to them.')
+  privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
 }
 
 @export()
@@ -119,5 +167,87 @@ type hubType = {
   runnersSubnet: hubSubnetType?
 
   @description('Optional. Tags applied to the hub resource group and every hub resource.')
+  tags: object?
+}
+
+@export()
+@description('Required. A subnet in a spoke virtual network. A spoke is a workload landing zone, so its subnets are not knowable in advance and are supplied as data.')
+type spokeSubnetType = {
+  @description('Required. Name of the subnet.')
+  @minLength(1)
+  @maxLength(80)
+  name: string
+
+  @description('Required. Address prefix for the subnet, in CIDR notation. Must fall inside the spoke address space and must not overlap another subnet.')
+  @minLength(9)
+  addressPrefix: string
+
+  @description('Optional. Allow RDP and SSH inbound from the hub `AzureBastionSubnet` prefix. Defaults to `true`, because Bastion can only reach a peered spoke virtual machine if the subnet NSG admits it. Set `false` for subnets that host no virtual machines, such as a private endpoint subnet, to keep the rule set minimal. Ignored when the hub has no Bastion.')
+  allowBastionAccess: bool?
+
+  @description('Optional. Service delegation for the subnet, for example `Microsoft.App/environments`. A delegated subnet is dedicated to that service.')
+  delegation: string?
+
+  @description('Optional. Service endpoints to enable on the subnet, for example `Microsoft.Storage`. Prefer private endpoints where the service supports them.')
+  serviceEndpoints: string[]?
+
+  @description('Optional. Private endpoint network policies for the subnet. Defaults to `Disabled`. Set `Enabled` on a subnet that hosts private endpoints and whose NSG or route table must apply to them.')
+  privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
+
+  @description('Optional. Extra security rules appended to this subnet\'s NSG. The generated Bastion rule occupies priority 100, so use 200 or above.')
+  securityRules: subnetSecurityRuleType[]?
+}
+
+@export()
+@description('Optional. Peering options for the link between a spoke and its hub. The defaults suit a traditional bidirectional peering with no gateway; override them only for a specific reason.')
+type spokePeeringType = {
+  @description('Optional. Allow traffic forwarded by a network virtual appliance, rather than originated in the peer. Defaults to `true`, which is inert until a hub firewall exists and avoids having to re-peer when one is introduced.')
+  allowForwardedTraffic: bool?
+
+  @description('Optional. Let the spoke use a gateway in the hub. Defaults to `false`. Setting it before the hub has a VPN or ExpressRoute gateway fails the peering outright. When a hub gateway lands, set this on the spoke and `allowHubGatewayTransit` alongside it.')
+  useRemoteGateways: bool?
+
+  @description('Optional. Let the hub share its gateway with this spoke. Defaults to `false`. Set it together with `useRemoteGateways` once a hub gateway exists.')
+  allowHubGatewayTransit: bool?
+}
+
+@export()
+@description('Required. A spoke in the hub-and-spoke topology.')
+type spokeType = {
+  @description('Required. Short name of the spoke. Resource names are derived from it, for example `vnet-<name>`.')
+  @minLength(1)
+  @maxLength(40)
+  name: string
+
+  @description('Required. Name of the hub this spoke peers with. Must match the `name` of an entry in the `hubs` parameter. Each spoke references exactly one hub; peering is not transitive, so spoke-to-spoke traffic needs a hub firewall or route tables, which this design keeps optional.')
+  @minLength(1)
+  @maxLength(40)
+  hubName: string
+
+  @description('Required. Azure region for the spoke. It does not have to match its hub; peering works across regions.')
+  @minLength(1)
+  location: string
+
+  @description('Optional. Subscription that hosts the spoke. Defaults to the subscription the deployment targets. Set this to place a spoke in another subscription of the same tenant. The deployment identity needs Contributor there; add it to `targetSubscriptionIds` in infra/bootstrap and redeploy that template by hand.')
+  @minLength(36)
+  @maxLength(36)
+  subscriptionId: string?
+
+  @description('Required. Resource group that holds the spoke. It is created by the deployment.')
+  @minLength(1)
+  @maxLength(90)
+  resourceGroupName: string
+
+  @description('Required. Address space of the spoke virtual network. Must not overlap any hub or any other spoke.')
+  @minLength(1)
+  addressPrefixes: string[]
+
+  @description('Optional. Subnets in the spoke. Each one gets its own network security group, so rules can be added later without adding infrastructure.')
+  subnets: spokeSubnetType[]?
+
+  @description('Optional. Peering options for the link to the hub. Omit to take the defaults, which suit a bidirectional peering with no gateway.')
+  peering: spokePeeringType?
+
+  @description('Optional. Tags applied to the spoke resource group and every spoke resource.')
   tags: object?
 }
