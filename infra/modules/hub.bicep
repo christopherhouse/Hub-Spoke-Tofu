@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { hubBastionType, hubNatGatewayType, hubSubnetType, hubVirtualNetworkName } from '../types.bicep'
+import { hubBastionType, hubNatGatewayType, hubSubnetType, hubVirtualNetworkName, subnetNetworkSecurityGroupName } from '../types.bicep'
 
 // Hub network for the hub-and-spoke topology.
 //
@@ -64,11 +64,12 @@ var bastionSubnetName = 'AzureBastionSubnet'
 module bastionNetworkSecurityGroup 'br/public:avm/res/network/network-security-group:0.5.3' = if (bastionEnabled) {
   name: 'nsg-${name}-bastion'
   params: {
-    name: 'nsg-${virtualNetworkName}-bastion'
+    name: subnetNetworkSecurityGroupName(virtualNetworkName, 'bastion')
     location: location
     tags: tags
     enableTelemetry: enableTelemetry
-    securityRules: [
+    securityRules: concat(
+      [
       {
         name: 'AllowHttpsInbound'
         properties: {
@@ -190,7 +191,11 @@ module bastionNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
           destinationPortRange: '80'
         }
       }
-    ]
+      ],
+      // Appended, never substituted. The rules above are the required Azure Bastion set; a
+      // caller rule that displaced one would break connectivity and stop platform updates.
+      bastion.?securityRules ?? []
+    )
   }
 }
 
@@ -199,31 +204,34 @@ module bastionNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
 module jumpboxNetworkSecurityGroup 'br/public:avm/res/network/network-security-group:0.5.3' = if (jumpboxEnabled) {
   name: 'nsg-${name}-jumpbox'
   params: {
-    name: 'nsg-${virtualNetworkName}-jumpbox'
+    name: subnetNetworkSecurityGroupName(virtualNetworkName, 'jumpbox')
     location: location
     tags: tags
     enableTelemetry: enableTelemetry
-    securityRules: bastionEnabled
-      ? [
-          {
-            name: 'AllowBastionRdpSshInbound'
-            properties: {
-              description: 'RDP and SSH from the AzureBastionSubnet only.'
-              access: 'Allow'
-              direction: 'Inbound'
-              priority: 100
-              protocol: 'Tcp'
-              sourceAddressPrefix: bastion!.subnetAddressPrefix
-              sourcePortRange: '*'
-              destinationAddressPrefix: jumpboxSubnet!.addressPrefix
-              destinationPortRanges: [
-                '22'
-                '3389'
-              ]
+    securityRules: concat(
+      bastionEnabled
+        ? [
+            {
+              name: 'AllowBastionRdpSshInbound'
+              properties: {
+                description: 'RDP and SSH from the AzureBastionSubnet only.'
+                access: 'Allow'
+                direction: 'Inbound'
+                priority: 100
+                protocol: 'Tcp'
+                sourceAddressPrefix: bastion!.subnetAddressPrefix
+                sourcePortRange: '*'
+                destinationAddressPrefix: jumpboxSubnet!.addressPrefix
+                destinationPortRanges: [
+                  '22'
+                  '3389'
+                ]
+              }
             }
-          }
-        ]
-      : []
+          ]
+        : [],
+      jumpboxSubnet.?securityRules ?? []
+    )
   }
 }
 
@@ -235,11 +243,12 @@ module jumpboxNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
 module runnersNetworkSecurityGroup 'br/public:avm/res/network/network-security-group:0.5.3' = if (runnersEnabled) {
   name: 'nsg-${name}-runners'
   params: {
-    name: 'nsg-${virtualNetworkName}-runners'
+    name: subnetNetworkSecurityGroupName(virtualNetworkName, 'runners')
     location: location
     tags: tags
     enableTelemetry: enableTelemetry
-    securityRules: [
+    securityRules: concat(
+      [
       {
         name: 'AllowContainerAppsSubnetInbound'
         properties: {
@@ -380,7 +389,11 @@ module runnersNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
           destinationPortRange: '443'
         }
       }
-    ]
+      ],
+      // Appended. The Container Apps outbound requirements above are load-bearing: the
+      // environment stops functioning if any of them is displaced.
+      runnersSubnet.?securityRules ?? []
+    )
   }
 }
 

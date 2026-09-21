@@ -1,7 +1,7 @@
 targetScope = 'subscription'
 
 import { curatedPrivateLinkPrivateDnsZones } from './zones.bicep'
-import { hubType, hubVirtualNetworkName } from './types.bicep'
+import { hubType, hubVirtualNetworkName, spokeType, spokeVirtualNetworkName } from './types.bicep'
 
 @description('Required. Name of the resource group that holds the shared Private DNS zones.')
 @minLength(1)
@@ -13,6 +13,9 @@ param location string
 
 @description('Optional. Hubs to deploy. Each entry creates its own resource group, virtual network, subnets and Azure Bastion, and its virtual network is linked to every Private DNS zone. Hubs may target other subscriptions in the same tenant.')
 param hubs hubType[] = []
+
+@description('Optional. Spokes to deploy. Each entry creates its own resource group, virtual network and subnets, peers bidirectionally with the hub named in `hubName`, and is linked to every Private DNS zone. Spokes may target other subscriptions in the same tenant, provided the deployment identity holds Contributor there.')
+param spokes spokeType[] = []
 
 @description('Optional. Additional virtual networks to link to every Private DNS zone, on top of the hub virtual networks, which are linked automatically. Each object needs a virtualNetworkResourceId.')
 param virtualNetworkLinks array = []
@@ -72,6 +75,68 @@ module hubNetworks 'modules/hub.bicep' = [
   }
 ]
 
+// Each spoke references exactly one hub, by name. Resolved here rather than passed as a
+// resource ID, so no hub virtual network ID is ever hand-copied into a .bicepparam file.
+//
+// A `hubName` that matches no hub yields null and fails with a null-reference error rather
+// than a helpful message: Bicep's `assert` is still an experimental feature, so the invariant
+// is documented in infra/README.md rather than enforced here.
+var spokeHubs = [
+  for spoke in spokes: first(filter(hubs, hub => hub.name == spoke.hubName))
+]
+
+// Empty when the hub has no Bastion, which suppresses the generated RDP and SSH rule in the
+// spoke rather than emitting one with an empty source prefix.
+var spokeHubBastionSubnetPrefixes = [
+  for (spoke, index) in spokes: (spokeHubs[index]!.?bastion != null && (spokeHubs[index]!.bastion!.?enabled ?? true))
+    ? spokeHubs[index]!.bastion!.subnetAddressPrefix
+    : ''
+]
+
+module spokeResourceGroups 'br/public:avm/res/resources/resource-group:0.4.4' = [
+  for spoke in spokes: {
+    name: 'deploy-rg-${spoke.name}'
+    scope: subscription(spoke.?subscriptionId ?? subscription().subscriptionId)
+    params: {
+      name: spoke.resourceGroupName
+      location: spoke.location
+      tags: spoke.?tags ?? tags
+      enableTelemetry: enableTelemetry
+    }
+  }
+]
+
+// The hub virtual network must exist before the peering can reference it, and the peering is
+// created in both directions from here, so the dependency is explicit.
+module spokeNetworks 'modules/spoke.bicep' = [
+  for (spoke, index) in spokes: {
+    name: 'deploy-spoke-${spoke.name}'
+    scope: resourceGroup(spoke.?subscriptionId ?? subscription().subscriptionId, spoke.resourceGroupName)
+    dependsOn: [
+      spokeResourceGroups[index]
+      hubNetworks
+    ]
+    params: {
+      name: spoke.name
+      location: spoke.location
+      addressPrefixes: spoke.addressPrefixes
+      subnets: spoke.?subnets ?? []
+      hubVirtualNetworkResourceId: resourceId(
+        spokeHubs[index]!.?subscriptionId ?? subscription().subscriptionId,
+        spokeHubs[index]!.resourceGroupName,
+        'Microsoft.Network/virtualNetworks',
+        hubVirtualNetworkName(spokeHubs[index]!.name)
+      )
+      hubBastionSubnetAddressPrefix: spokeHubBastionSubnetPrefixes[index]
+      allowForwardedTraffic: spoke.?peering.?allowForwardedTraffic ?? true
+      useRemoteGateways: spoke.?peering.?useRemoteGateways ?? false
+      allowHubGatewayTransit: spoke.?peering.?allowHubGatewayTransit ?? false
+      tags: spoke.?tags ?? tags
+      enableTelemetry: enableTelemetry
+    }
+  }
+]
+
 // Derived rather than supplied as a parameter, so no hub virtual network resource ID is ever
 // hand-copied into a .bicepparam file. The IDs are composed from the hub definitions instead
 // of read from the hub module outputs, because a variable loop cannot reference module
@@ -90,6 +155,20 @@ var hubVirtualNetworkLinks = [
   }
 ]
 
+// Spokes are linked on the same terms as hubs, so a private endpoint in a spoke resolves
+// without waiting for a DNS private resolver in the hub.
+var spokeVirtualNetworkLinks = [
+  for spoke in spokes: {
+    virtualNetworkResourceId: resourceId(
+      spoke.?subscriptionId ?? subscription().subscriptionId,
+      spoke.resourceGroupName,
+      'Microsoft.Network/virtualNetworks',
+      spokeVirtualNetworkName(spoke.name)
+    )
+    registrationEnabled: false
+  }
+]
+
 // Deployed into the resource group above. Cross-subscription placement for future hubs and
 // spokes uses resourceGroup(<subscriptionId>, <name>) here; no provider plumbing is needed.
 module privateDnsZones 'br/public:avm/ptn/network/private-link-private-dns-zones:0.7.3' = {
@@ -100,12 +179,13 @@ module privateDnsZones 'br/public:avm/ptn/network/private-link-private-dns-zones
   dependsOn: [
     dnsResourceGroup
     hubNetworks
+    spokeNetworks
   ]
   params: {
     location: location
     privateLinkPrivateDnsZones: curatedPrivateLinkPrivateDnsZones
     additionalPrivateLinkPrivateDnsZonesToInclude: additionalPrivateLinkPrivateDnsZonesToInclude
-    virtualNetworkLinks: concat(hubVirtualNetworkLinks, virtualNetworkLinks)
+    virtualNetworkLinks: concat(hubVirtualNetworkLinks, spokeVirtualNetworkLinks, virtualNetworkLinks)
     tags: tags
     enableTelemetry: enableTelemetry
   }
@@ -135,5 +215,20 @@ output hubs array = [
     jumpboxSubnetResourceId: hubNetworks[index].outputs.jumpboxSubnetResourceId
     natGatewayResourceId: hubNetworks[index].outputs.natGatewayResourceId
     runnersSubnetResourceId: hubNetworks[index].outputs.runnersSubnetResourceId
+  }
+]
+
+@description('The spokes that were deployed, with their virtual network and subnet resource IDs and the hub each is peered to.')
+output spokes array = [
+  for (spoke, index) in spokes: {
+    name: spoke.name
+    hubName: spoke.hubName
+    location: spoke.location
+    subscriptionId: spoke.?subscriptionId ?? subscription().subscriptionId
+    resourceGroupName: spoke.resourceGroupName
+    virtualNetworkResourceId: spokeNetworks[index].outputs.virtualNetworkResourceId
+    virtualNetworkName: spokeNetworks[index].outputs.virtualNetworkName
+    addressPrefixes: spokeNetworks[index].outputs.addressPrefixes
+    subnets: spokeNetworks[index].outputs.subnets
   }
 ]
