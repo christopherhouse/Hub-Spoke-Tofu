@@ -600,7 +600,40 @@ leave offline runners to accumulate.
 ### Only private repositories
 
 A self-hosted runner attached to a public repository executes code from any fork, on your
-network, behind your NAT gateway. Never list a public repository in `githubRunners`.
+network, behind your NAT gateway. The container holds the runner managed identity, which can
+read the GitHub App private key from Key Vault — and that key controls every runner, not just
+the one that leaked it. Never list a public repository in `githubRunners`.
+
+"Nobody contributes to my repositories" is not a mitigation. Anyone can fork a public
+repository and open a pull request without your involvement. GitHub's first-time-contributor
+approval gate helps, but it is a human decision repeated forever, not a boundary.
+
+`onboard-runner.yml` enforces this: it reads the target repository with the workflow token and
+fails outright if it proves to be public. A private repository on the same account returns 404
+to that token, so it cannot be positively confirmed and is reported rather than approved.
+
+Note that needing a virtual network runner is a separate question from being allowed one. A
+repository whose deployments only reach public Azure control-plane endpoints — this one, for
+instance — runs perfectly well on `ubuntu-latest`. Virtual network runners earn their cost on
+repositories that have to reach private endpoints.
+
+### Prerequisite: your own access to the vault
+
+The vault uses Azure RBAC, so **Owner or Contributor on the subscription grants no access to
+secrets**. Seeding the App key fails with a 403 until the human doing it holds a data-plane
+role. Grant it once:
+
+```powershell
+az role assignment create `
+  --assignee-object-id (az ad signed-in-user show --query id -o tsv) `
+  --assignee-principal-type User `
+  --role "Key Vault Secrets Officer" `
+  --scope <vault resource ID>
+```
+
+This cannot be done by the deployment: the identity's constrained RBAC grant permits only
+`AcrPull` and `Key Vault Secrets User`, and deliberately not an officer role that could write
+secrets. It is a one-time human step, like the bootstrap itself.
 
 ### What the image can and cannot do
 
