@@ -11,7 +11,8 @@ either is a parameter change, not a template change.
 |---|---|
 | Shared Private Link DNS zone catalog | Implemented |
 | Hub VNet, subnets, NSGs and Azure Bastion Standard | Implemented |
-| NAT gateway on the jump box and runners subnets | Implemented |
+| Azure Firewall in the hub, with transit routing from spokes | Implemented |
+| Template-managed route tables on hub and spoke subnets | Implemented |
 | Windows jump boxes in the hub, Bastion-only, Entra sign-in | Implemented |
 | Spoke VNets and bidirectional peering, across subscriptions | Implemented |
 | Dedicated NSG on every subnet, rules set from parameters | Implemented |
@@ -30,17 +31,19 @@ infra/
   main.bicepparam    parameter values
   types.bicep        shared user-defined types, e.g. hubType (@export)
   zones.bicep        curated Private Link DNS zone catalog (@export)
+  runner-nsg-rules.bicep   NSG rules for the Container Apps runners subnet (@export)
   bootstrap/
     main.bicep       deployment identity and its RBAC, deployed by hand, never by CI
     main.bicepparam
     modules/
       subscription-role-assignment.bicep   one role for the identity on one subscription
   modules/
-    hub.bicep        hub VNet, subnets, NSGs, Azure Bastion and the NAT gateway
-    spoke.bicep      spoke VNet, subnets, per-subnet NSGs and peering to its hub
+    hub.bicep        hub VNet, subnets, NSGs, route tables, Azure Bastion and Azure Firewall
+    spoke.bicep      spoke VNet, subnets, per-subnet NSGs and route tables, peering to its hub
+    firewall.bicep   Azure Firewall and its policy, including the always-SNAT setting
     log-analytics.bicep              shared workspace, deployed before anything reports to it
     platform.bicep                   Key Vault, container registry and the runner identity
-    container-apps-environment.bicep runner environment in the hub runners subnet
+    container-apps-environment.bicep runner environment in the runners spoke
     github-runner-job.bicep          one event-driven runner job per repository
   README.md
 images/
@@ -71,8 +74,9 @@ Requires Azure CLI with the Bicep extension.
 
 ### Subscription prerequisite: public IP allocation
 
-Bastion and the NAT gateway each need a public IP. Some subscriptions cannot allocate one
-until the `AllowBringYourOwnPublicIpAddress` feature is registered, and fail with:
+Bastion needs one public IP and the Azure Firewall needs two. Some subscriptions cannot
+allocate any until the `AllowBringYourOwnPublicIpAddress` feature is registered, and fail
+with:
 
 ```
 SubscriptionNotRegisteredForFeature - Subscription ... is not registered for feature

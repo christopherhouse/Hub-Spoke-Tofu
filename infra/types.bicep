@@ -45,6 +45,135 @@ func subnetNetworkSecurityGroupName(virtualNetworkName string, suffix string) st
   'nsg-${virtualNetworkName}-${suffix}'
 
 @export()
+@description('Returns the name of the route table attached to a subnet. A route table is only created for a subnet that declares routes, so unlike the network security group convention this is not applied to every subnet. Azure limits the name to 80 characters.')
+func subnetRouteTableName(virtualNetworkName string, suffix string) string =>
+  'rt-${virtualNetworkName}-${suffix}'
+
+// The hub firewall is the next hop for transit routing, but its private IP is not known when
+// the route tables are built: a route table must exist before the virtual network that
+// references it, and the firewall cannot exist until its subnet does. Naming the firewall
+// symbolically here breaks that cycle and keeps IP addresses out of the parameter file.
+@export()
+@description('Required. Next hop for a route. `HubFirewall` is resolved by the template to the private IP of the hub firewall, so no address is hand-copied into a parameter file; it requires the hub to define `firewall`. The remaining values are the Azure next hop types, and `VirtualAppliance` requires `nextHopIpAddress`.')
+type subnetRouteNextHopType =
+  | 'HubFirewall'
+  | 'VirtualAppliance'
+  | 'VirtualNetworkGateway'
+  | 'VnetLocal'
+  | 'Internet'
+  | 'None'
+
+@export()
+@description('Optional. A user-defined route in a subnet route table.')
+type subnetRouteType = {
+  @description('Required. Name of the route.')
+  @minLength(1)
+  @maxLength(80)
+  name: string
+
+  @description('Required. Destination prefix the route applies to, in CIDR notation. `0.0.0.0/0` sends all otherwise-unmatched traffic to the next hop.')
+  @minLength(7)
+  addressPrefix: string
+
+  @description('Required. Next hop for traffic matching the prefix. Prefer `HubFirewall`, which resolves to the hub firewall private IP.')
+  nextHopType: subnetRouteNextHopType
+
+  @description('Optional. Next hop IP address. Required when `nextHopType` is `VirtualAppliance`, and ignored otherwise. Leave it unset for `HubFirewall`, which supplies the address itself.')
+  nextHopIpAddress: string?
+}
+
+@export()
+@description('Optional. Azure Firewall in a hub. It is the next hop that makes spoke-to-spoke transit and centralised egress work: virtual network peering is not transitive, so without an appliance in the hub a spoke can only reach its hub and not another spoke. Requires a dedicated subnet named exactly `AzureFirewallSubnet`, sized /26 or larger.')
+type hubFirewallType = {
+  @description('Optional. Deploy the firewall. Defaults to `true`.')
+  enabled: bool?
+
+  @description('Optional. Name of the firewall. Defaults to `afw-<hub name>`.')
+  @minLength(1)
+  @maxLength(80)
+  name: string?
+
+  @description('Required. Address prefix for `AzureFirewallSubnet`, in CIDR notation. Azure requires /26 or larger. The subnet name is fixed by Azure and cannot be changed.')
+  @minLength(9)
+  subnetAddressPrefix: string
+
+  @description('Optional. Address prefix for `AzureFirewallManagementSubnet`, in CIDR notation, /26 or larger. Required by the `Basic` SKU, which always deploys a management NIC, and otherwise only needed for forced tunnelling. The subnet name is fixed by Azure.')
+  @minLength(9)
+  managementSubnetAddressPrefix: string?
+
+  @description('Optional. Firewall SKU tier. Defaults to `Basic`, which is sufficient for transit and egress filtering with application rules and costs roughly a third of `Standard`. `Basic` is throughput-limited to around 250 Mbps and always requires `managementSubnetAddressPrefix`.')
+  skuTier: ('Basic' | 'Standard' | 'Premium')?
+
+  @description('Optional. Availability zones for the firewall. Defaults to `[]`, meaning no zone. Zone redundancy costs nothing for the firewall itself but does incur inter-zone data transfer.')
+  availabilityZones: (1 | 2 | 3)[]?
+
+  @description('Optional. Application rules, evaluated before network rules and always SNATed by Azure Firewall. Prefer these for traffic destined to a private endpoint. Defaults to an empty collection.')
+  applicationRules: firewallApplicationRuleType[]?
+
+  @description('Optional. Network rules, matched on address or service tag rather than FQDN. These are only SNATed when the destination falls outside `snatPrivateRanges`. Defaults to an empty collection.')
+  networkRules: firewallNetworkRuleType[]?
+
+  @description('Optional. Destination ranges the firewall treats as private and therefore does **not** SNAT. Defaults to `[\'255.255.255.255/32\']`, which means always SNAT, including to private addresses. That default is load-bearing: it lets a spoke reach a private endpoint in another spoke, because the endpoint then sees the firewall private IP, which its own hub peering can already route back to. Setting `0.0.0.0/0` is the opposite - never SNAT - and stops the firewall reaching the internet.')
+  snatPrivateRanges: string[]?
+}
+
+@export()
+@description('Optional. An Azure Firewall application rule, matched on destination FQDN. Azure Firewall always SNATs traffic processed by application rules, which is why Microsoft recommends them over network rules for traffic destined to a private endpoint.')
+type firewallApplicationRuleType = {
+  @description('Required. Name of the rule.')
+  @minLength(1)
+  name: string
+
+  @description('Required. Source address prefixes the rule applies to.')
+  @minLength(1)
+  sourceAddresses: string[]
+
+  @description('Optional. Destination FQDNs, for example `mcr.microsoft.com` or `*.data.mcr.microsoft.com`.')
+  targetFqdns: string[]?
+
+  @description('Optional. Destination FQDN tags, for example `WindowsUpdate`. A rule uses either `targetFqdns` or `fqdnTags`, never both.')
+  fqdnTags: string[]?
+
+  @description('Optional. Protocols and ports the rule allows. Defaults to HTTPS on 443.')
+  protocols: firewallApplicationProtocolType[]?
+}
+
+@export()
+@description('Optional. A protocol and port pair for an Azure Firewall application rule.')
+type firewallApplicationProtocolType = {
+  @description('Required. Protocol type.')
+  protocolType: ('Http' | 'Https' | 'Mssql')
+
+  @description('Required. Destination port.')
+  @minValue(1)
+  @maxValue(65535)
+  port: int
+}
+
+@export()
+@description('Optional. An Azure Firewall network rule, matched on destination address or service tag.')
+type firewallNetworkRuleType = {
+  @description('Required. Name of the rule.')
+  @minLength(1)
+  name: string
+
+  @description('Required. Source address prefixes the rule applies to.')
+  @minLength(1)
+  sourceAddresses: string[]
+
+  @description('Required. Destination addresses, prefixes or service tags, for example `AzureActiveDirectory`.')
+  @minLength(1)
+  destinationAddresses: string[]
+
+  @description('Required. Destination ports.')
+  @minLength(1)
+  destinationPorts: string[]
+
+  @description('Optional. IP protocols the rule allows. Defaults to TCP.')
+  protocols: ('TCP' | 'UDP' | 'ICMP' | 'Any')[]?
+}
+
+@export()
 @description('Optional. Azure Bastion configuration for a hub. Bastion Standard is used so that the host can reach virtual machines in peered spokes; the Developer SKU cannot peer.')
 type hubBastionType = {
   @description('Optional. Deploy Azure Bastion into the hub. Defaults to `true`.')
@@ -78,35 +207,6 @@ type hubBastionType = {
 }
 
 @export()
-@description('Optional. NAT gateway for a hub. It is attached to the jump box subnet and to the Container Apps runners subnet so that outbound traffic leaves through a known, static public IP rather than an ephemeral default-outbound address. Azure requires a Standard SKU static public IP for a NAT gateway.')
-type hubNatGatewayType = {
-  @description('Optional. Deploy the NAT gateway. Defaults to `true`.')
-  enabled: bool?
-
-  @description('Optional. Name of the NAT gateway. Defaults to `ng-<hub name>`.')
-  @minLength(1)
-  @maxLength(80)
-  name: string?
-
-  @description('Optional. NAT gateway SKU. Defaults to `Standard`.')
-  skuName: ('Standard' | 'StandardV2')?
-
-  @description('Optional. Availability zone for the NAT gateway and its public IP. A NAT gateway is either zonal or non-zonal; it cannot be zone-redundant. Defaults to `-1`, meaning no zone.')
-  availabilityZone: (-1 | 1 | 2 | 3)?
-
-  @description('Optional. Idle timeout of the outbound flows, in minutes. Defaults to `4`.')
-  @minValue(4)
-  @maxValue(120)
-  idleTimeoutInMinutes: int?
-
-  @description('Optional. Resource IDs of existing public IP addresses to attach. Supply these to keep an already allow-listed address. When omitted, one Standard static public IP is created.')
-  publicIpResourceIds: string[]?
-
-  @description('Optional. Resource IDs of existing public IP prefixes to attach. Use a prefix when a contiguous, allow-listable range of outbound addresses is required.')
-  publicIpPrefixResourceIds: string[]?
-}
-
-@export()
 @description('Optional. A plain hub subnet defined by name and address prefix.')
 type hubSubnetType = {
   @description('Optional. Create the subnet. Defaults to `true`.')
@@ -123,6 +223,9 @@ type hubSubnetType = {
 
   @description('Optional. Extra security rules appended to this subnet\'s NSG. Every subnet gets its own NSG, so rules can be added here without any template change. The rules generated for the subnet are always kept; see the reserved priority ranges in infra/README.md.')
   securityRules: subnetSecurityRuleType[]?
+
+  @description('Optional. User-defined routes for this subnet. A route table is created and associated only when routes are supplied. Use `nextHopType: \'HubFirewall\'` to send traffic through the hub firewall. Never add a `0.0.0.0/0` route to `AzureBastionSubnet`, which requires direct internet access, or to `AzureFirewallSubnet`, where it is forced tunnelling.')
+  routes: subnetRouteType[]?
 
   @description('Optional. Private endpoint network policies for the subnet. Defaults to `Disabled`. Set `Enabled` on a subnet that hosts private endpoints and whose NSG or route table must apply to them.')
   privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
@@ -262,11 +365,8 @@ type hubType = {
   @description('Optional. Subnet for management jump boxes. Omit to deploy the hub without one.')
   jumpboxSubnet: hubSubnetType?
 
-  @description('Optional. NAT gateway attached to the jump box subnet and the Container Apps runners subnet. Omit to deploy the hub without one, in which case jump boxes and runners fall back to Azure default outbound access.')
-  natGateway: hubNatGatewayType?
-
-  @description('Optional. Subnet for the Azure Container Apps environment that hosts self-hosted GitHub Actions runners. Delegated to `Microsoft.App/environments`. A workload profile environment requires /27 or larger, and the prefix cannot be changed once an environment exists in it.')
-  runnersSubnet: hubSubnetType?
+  @description('Optional. Azure Firewall for the hub. It is the next hop that makes spoke-to-spoke transit and centralised egress work, because virtual network peering is not transitive. Omit to deploy the hub without one, in which case no subnet can route through it.')
+  firewall: hubFirewallType?
 
   @description('Optional. Management jump boxes in the hub. Each one lands in the jump box subnet with no public IP and is reachable only through Bastion. Requires `jumpboxSubnet`.')
   jumpboxes: jumpboxType[]?
@@ -298,6 +398,9 @@ type spokeSubnetType = {
 
   @description('Optional. Private endpoint network policies for the subnet. Defaults to `Disabled`. Set `Enabled` on a subnet that hosts private endpoints and whose NSG or route table must apply to them.')
   privateEndpointNetworkPolicies: subnetPrivateEndpointNetworkPoliciesType?
+
+  @description('Optional. User-defined routes for this subnet. A route table is created and associated only when routes are supplied. Use `nextHopType: \'HubFirewall\'` to send traffic through the hub firewall, which is how a spoke reaches another spoke: peering is not transitive, so without it a spoke can only reach its hub.')
+  routes: subnetRouteType[]?
 
   @description('Optional. Extra security rules appended to this subnet\'s NSG. The generated Bastion rule occupies priority 100, so use 200 or above.')
   securityRules: subnetSecurityRuleType[]?
@@ -463,21 +566,26 @@ type platformType = {
 // ---------------------------------------------------------------------------------------
 
 @export()
-@description('Returns the name of the Container Apps environment a hub of the given name deploys. Single source of the convention, so a caller can compose the resource ID without reading the module outputs.')
-func containerAppsEnvironmentName(hubName string) string => 'cae-${hubName}'
+@description('Returns the name of the Container Apps environment deployed for a spoke of the given name. Single source of the convention, so a caller can compose the resource ID without reading the module outputs.')
+func containerAppsEnvironmentName(spokeName string) string => 'cae-${spokeName}'
 
 @export()
-@description('Optional. The Azure Container Apps environment that hosts the self-hosted runner jobs. It lands in the hub runners subnet, which must exist and be delegated to `Microsoft.App/environments`.')
+@description('Optional. The Azure Container Apps environment that hosts the self-hosted runner jobs. It lands in a spoke subnet, which must exist and be delegated to `Microsoft.App/environments`. It is deliberately not in the hub: a hub is a connectivity landing zone and should not host workload compute.')
 type containerAppsEnvironmentType = {
   @description('Optional. Deploy the environment. Defaults to `true`.')
   enabled: bool?
 
-  @description('Required. Name of the hub that hosts the environment. Must match the `name` of an entry in the `hubs` parameter, and that hub must define `runnersSubnet`.')
+  @description('Required. Name of the spoke that hosts the environment. Must match the `name` of an entry in the `spokes` parameter, and that spoke must define the subnet named in `subnetName`.')
   @minLength(1)
   @maxLength(40)
-  hubName: string
+  spokeName: string
 
-  @description('Optional. Name of the environment. Defaults to `cae-<hub name>`.')
+  @description('Optional. Name of the delegated subnet in that spoke that the environment uses as its infrastructure subnet. Defaults to `snet-runners`. It must be delegated to `Microsoft.App/environments` and sized /27 or larger, and its prefix cannot be changed once an environment exists in it.')
+  @minLength(1)
+  @maxLength(80)
+  subnetName: string?
+
+  @description('Optional. Name of the environment. Defaults to `cae-<spoke name>`.')
   @minLength(1)
   @maxLength(60)
   name: string?

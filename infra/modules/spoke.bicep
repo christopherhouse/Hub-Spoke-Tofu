@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { spokeSubnetType, subnetNetworkSecurityGroupName, spokeVirtualNetworkName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
+import { spokeSubnetType, subnetNetworkSecurityGroupName, subnetRouteTableName, subnetRouteType, spokeVirtualNetworkName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
 
 // Spoke network for the hub-and-spoke topology.
 //
@@ -32,6 +32,9 @@ param hubVirtualNetworkResourceId string
 @description('Optional. Address prefix of the hub `AzureBastionSubnet`. Supply it to allow RDP and SSH from Bastion into spoke subnets. Empty when the hub has no Bastion, in which case no Bastion rule is generated.')
 param hubBastionSubnetAddressPrefix string = ''
 
+@description('Optional. Private IP address of the hub firewall. Supply it to resolve routes declared with `nextHopType: \'HubFirewall\'`. Empty when the hub has no firewall, in which case such a route would be meaningless and the deployment fails rather than creating a route to nowhere.')
+param hubFirewallPrivateIpAddress string = ''
+
 @description('Optional. Allow traffic forwarded by a network virtual appliance rather than originated in the peer. Defaults to `true`: inert until a hub firewall exists, and enabling it up front avoids re-peering later.')
 param allowForwardedTraffic bool = true
 
@@ -53,6 +56,28 @@ param enableTelemetry bool = true
 var virtualNetworkName = spokeVirtualNetworkName(name)
 
 var bastionAccessAvailable = !empty(hubBastionSubnetAddressPrefix)
+
+// Routes are declared symbolically in the parameter file so that no IP address is hand-copied
+// into it. `HubFirewall` resolves here, to the address the hub module reported.
+func resolveRoutes(routes subnetRouteType[], firewallIpAddress string) object[] =>
+  map(routes, route => {
+    name: route.name
+    properties: {
+      addressPrefix: route.addressPrefix
+      nextHopType: route.nextHopType == 'HubFirewall' ? 'VirtualAppliance' : route.nextHopType
+      nextHopIpAddress: route.nextHopType == 'HubFirewall'
+        ? firewallIpAddress
+        : route.?nextHopIpAddress
+    }
+  })
+
+// A route table is created only for a subnet that declares routes, unlike the network security
+// group, which every subnet gets. An empty route table is not inert: it still shadows nothing
+// but adds a resource to reason about, and a subnet with no user-defined routes behaves
+// correctly on the system routes alone.
+var subnetRouteTableEnabled = [
+  for subnet in subnets: !empty(subnet.?routes ?? [])
+]
 
 // One diagnostic setting shape, reused by every module below, so that turning diagnostics on
 // or off is a single decision rather than a per-resource one.
@@ -108,6 +133,22 @@ module subnetNetworkSecurityGroups 'br/public:avm/res/network/network-security-g
   }
 ]
 
+// A route table per subnet that declares routes. This is what makes spoke-to-spoke traffic
+// possible at all: peering is not transitive, so a route through the hub firewall is the only
+// path from this spoke to a private endpoint in another one.
+module subnetRouteTables 'br/public:avm/res/network/route-table:0.5.0' = [
+  for (subnet, index) in subnets: if (subnetRouteTableEnabled[index]) {
+    name: take('rt-${uniqueString(subnet.name)}-${subnet.name}', 64)
+    params: {
+      name: subnetRouteTableName(virtualNetworkName, subnet.name)
+      location: location
+      tags: tags
+      enableTelemetry: enableTelemetry
+      routes: resolveRoutes(subnet.?routes ?? [], hubFirewallPrivateIpAddress)
+    }
+  }
+]
+
 // The AVM module creates both directions when remotePeeringEnabled is set, and derives the
 // remote subscription and resource group by splitting remoteVirtualNetworkResourceId. That is
 // what makes cross-subscription peering a parameter change: no provider plumbing, only
@@ -126,6 +167,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
         name: subnet.name
         addressPrefix: subnet.addressPrefix
         networkSecurityGroupResourceId: subnetNetworkSecurityGroups[index].outputs.resourceId
+        routeTableResourceId: subnetRouteTableEnabled[index] ? subnetRouteTables[index]!.outputs.resourceId : null
         delegation: subnet.?delegation
         serviceEndpoints: subnet.?serviceEndpoints
         privateEndpointNetworkPolicies: subnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies

@@ -89,8 +89,7 @@ module hubNetworks 'modules/hub.bicep' = [
       addressPrefixes: hub.addressPrefixes
       bastion: hub.?bastion
       jumpboxSubnet: hub.?jumpboxSubnet
-      natGateway: hub.?natGateway
-      runnersSubnet: hub.?runnersSubnet
+      firewall: hub.?firewall
       jumpboxes: hub.?jumpboxes ?? []
       logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
       tags: hub.?tags ?? tags
@@ -157,6 +156,15 @@ var spokeHubs = [
   for spoke in spokes: first(filter(hubs, hub => hub.name == spoke.hubName))
 ]
 
+// The position of each spoke's hub in the `hubs` array, so a spoke can read that hub module's
+// outputs. `spokeHubs` holds the hub definition but a module output has to be indexed by
+// position, and a filter does not give one back.
+var hubNames = map(hubs, hub => hub.name)
+
+var spokeHubIndexes = [
+  for spoke in spokes: indexOf(hubNames, spoke.hubName)
+]
+
 // Empty when the hub has no Bastion, which suppresses the generated RDP and SSH rule in the
 // spoke rather than emitting one with an empty source prefix.
 var spokeHubBastionSubnetPrefixes = [
@@ -200,6 +208,9 @@ module spokeNetworks 'modules/spoke.bicep' = [
         hubVirtualNetworkName(spokeHubs[index]!.name)
       )
       hubBastionSubnetAddressPrefix: spokeHubBastionSubnetPrefixes[index]
+      // Read back from the hub module rather than computed, because spokes deploy after hubs
+      // and can therefore see the firewall's real private IP.
+      hubFirewallPrivateIpAddress: hubNetworks[spokeHubIndexes[index]].outputs.firewallPrivateIp
       allowForwardedTraffic: spoke.?peering.?allowForwardedTraffic ?? true
       useRemoteGateways: spoke.?peering.?useRemoteGateways ?? false
       allowHubGatewayTransit: spoke.?peering.?allowHubGatewayTransit ?? false
@@ -323,45 +334,48 @@ module platformServices 'modules/platform.bicep' = if (platformEnabled) {
 // Self-hosted runners
 // ---------------------------------------------------------------------------------------
 
-var runnerHub = containerAppsEnvironment == null
+// The environment lands in a spoke, not in the hub: a hub is a connectivity landing zone and
+// should not host workload compute. The spoke supplies the subscription, resource group and
+// region, which is why `containerAppsEnvironmentType` restates none of them.
+var runnerSpoke = containerAppsEnvironment == null
   ? null
-  : first(filter(hubs, hub => hub.name == containerAppsEnvironment!.hubName))
+  : first(filter(spokes, spoke => spoke.name == containerAppsEnvironment!.spokeName))
 
 var containerAppsEnvironmentEnabled = containerAppsEnvironment != null && (containerAppsEnvironment!.?enabled ?? true)
 
-var runnerHubSubscriptionId = containerAppsEnvironmentEnabled
-  ? (runnerHub!.?subscriptionId ?? subscription().subscriptionId)
+var runnerSpokeSubscriptionId = containerAppsEnvironmentEnabled
+  ? (runnerSpoke!.?subscriptionId ?? subscription().subscriptionId)
   : subscription().subscriptionId
 
-var runnerHubResourceGroupName = containerAppsEnvironmentEnabled ? runnerHub!.resourceGroupName : ''
+var runnerSpokeResourceGroupName = containerAppsEnvironmentEnabled ? runnerSpoke!.resourceGroupName : ''
 
 var resolvedContainerAppsEnvironmentName = containerAppsEnvironmentEnabled
-  ? (containerAppsEnvironment!.?name ?? containerAppsEnvironmentName(runnerHub!.name))
+  ? (containerAppsEnvironment!.?name ?? containerAppsEnvironmentName(runnerSpoke!.name))
   : ''
 
-// The runners subnet resource ID is composed from the hub definition rather than read from the
-// hub module outputs, because a module deployed at a different scope cannot take a conditional
-// module's output as a scope argument.
+// The runners subnet resource ID is composed from the spoke definition rather than read from
+// the spoke module outputs, because a module deployed at a different scope cannot take a
+// conditional module's output as a scope argument.
 module runnerEnvironment 'modules/container-apps-environment.bicep' = if (containerAppsEnvironmentEnabled) {
   name: 'deploy-aca-environment'
-  scope: resourceGroup(runnerHubSubscriptionId, runnerHubResourceGroupName)
+  scope: resourceGroup(runnerSpokeSubscriptionId, runnerSpokeResourceGroupName)
   dependsOn: [
-    hubNetworks
+    spokeNetworks
   ]
   params: {
     name: resolvedContainerAppsEnvironmentName
-    location: runnerHub!.location
+    location: runnerSpoke!.location
     infrastructureSubnetResourceId: resourceId(
-      runnerHubSubscriptionId,
-      runnerHubResourceGroupName,
+      runnerSpokeSubscriptionId,
+      runnerSpokeResourceGroupName,
       'Microsoft.Network/virtualNetworks/subnets',
-      hubVirtualNetworkName(runnerHub!.name),
-      runnerHub!.?runnersSubnet.?name ?? 'snet-runners'
+      spokeVirtualNetworkName(runnerSpoke!.name),
+      containerAppsEnvironment!.?subnetName ?? 'snet-runners'
     )
     internal: containerAppsEnvironment!.?internal ?? true
     zoneRedundant: containerAppsEnvironment!.?zoneRedundant ?? false
     logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
-    tags: runnerHub!.?tags ?? tags
+    tags: runnerSpoke!.?tags ?? tags
     enableTelemetry: enableTelemetry
   }
 }
@@ -383,16 +397,16 @@ var runnerJobNames = [
 module runnerJobs 'modules/github-runner-job.bicep' = [
   for (runner, index) in githubRunners: if (containerAppsEnvironmentEnabled && platformEnabled && (runner.?enabled ?? true)) {
     name: take('deploy-runner-${toLower(runner.repositoryOwner)}-${runnerJobNames[index]}', 64)
-    scope: resourceGroup(runnerHubSubscriptionId, runnerHubResourceGroupName)
+    scope: resourceGroup(runnerSpokeSubscriptionId, runnerSpokeResourceGroupName)
     dependsOn: [
       runnerEnvironment
     ]
     params: {
       name: runnerJobNames[index]
-      location: runnerHub!.location
+      location: runnerSpoke!.location
       environmentResourceId: resourceId(
-        runnerHubSubscriptionId,
-        runnerHubResourceGroupName,
+        runnerSpokeSubscriptionId,
+        runnerSpokeResourceGroupName,
         'Microsoft.App/managedEnvironments',
         resolvedContainerAppsEnvironmentName
       )
@@ -432,8 +446,8 @@ output hubs array = [
     bastionResourceId: hubNetworks[index].outputs.bastionResourceId
     bastionSubnetResourceId: hubNetworks[index].outputs.bastionSubnetResourceId
     jumpboxSubnetResourceId: hubNetworks[index].outputs.jumpboxSubnetResourceId
-    natGatewayResourceId: hubNetworks[index].outputs.natGatewayResourceId
-    runnersSubnetResourceId: hubNetworks[index].outputs.runnersSubnetResourceId
+    firewallResourceId: hubNetworks[index].outputs.firewallResourceId
+    firewallPrivateIp: hubNetworks[index].outputs.firewallPrivateIp
     jumpboxes: hubNetworks[index].outputs.jumpboxes
   }
 ]
@@ -476,9 +490,9 @@ output containerAppsEnvironment object = containerAppsEnvironmentEnabled
   ? {
       name: runnerEnvironment!.outputs.name
       resourceId: runnerEnvironment!.outputs.resourceId
-      hubName: runnerHub!.name
-      subscriptionId: runnerHubSubscriptionId
-      resourceGroupName: runnerHubResourceGroupName
+      spokeName: runnerSpoke!.name
+      subscriptionId: runnerSpokeSubscriptionId
+      resourceGroupName: runnerSpokeResourceGroupName
       workloadProfileName: runnerEnvironment!.outputs.workloadProfileName
     }
   : {}

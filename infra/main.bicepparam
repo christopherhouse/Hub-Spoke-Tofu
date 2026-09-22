@@ -1,5 +1,9 @@
 using './main.bicep'
 
+// The runner NSG rule set lives in its own file rather than inline here because it is a
+// reviewed security artifact, the same way the Private DNS zone catalog is.
+import { runnerSecurityRules } from './runner-nsg-rules.bicep'
+
 param dnsResourceGroupName = 'RG-CONNECTIVITY-DNS-CUS'
 
 // Also substituted into regional zone names, e.g. privatelink.centralus.azurecontainerapps.io
@@ -12,9 +16,14 @@ param location = 'centralus'
 // Hub 1 address plan, inside 10.0.0.0/19 (10.0.0.0 - 10.0.31.255):
 //   10.0.0.0/26    AzureBastionSubnet   Azure minimum is /26
 //   10.0.0.64/27   snet-jumpbox
-//   10.0.0.96/27   free                 keeps snet-runners on a /26 boundary
-//   10.0.0.128/26  snet-runners         Container Apps, 50 usable IPs
-//   10.0.0.192 - 10.0.31.255            reserved for firewall, gateway, DNS resolver
+//   10.0.0.96/27   free
+//   10.0.0.128/26  ORPHANED - DO NOT REUSE. The former snet-runners. Dropped from this
+//                  template when the runners moved to spoke-runners-wu3, but still present in
+//                  Azure and still occupied by the failed cae-hub-cus environment. See the
+//                  Known orphans section of infra/README.md.
+//   10.0.0.192/26  AzureFirewallSubnet  fixed name, Azure minimum is /26
+//   10.0.1.0/26    AzureFirewallManagementSubnet  fixed name, required by the Basic SKU
+//   10.0.1.64 - 10.0.31.255             reserved for gateway and DNS resolver
 param hubs = [
   {
     name: 'hub-cus'
@@ -30,14 +39,124 @@ param hubs = [
     }
     jumpboxSubnet: {
       addressPrefix: '10.0.0.64/27'
+      // The jump box egresses through the firewall rather than a NAT gateway, so the whole
+      // estate leaves through one address and one set of logs. `HubFirewall` is resolved to
+      // the firewall's private IP by the hub module; no IP address is written down here.
+      routes: [
+        {
+          name: 'default-to-firewall'
+          addressPrefix: '0.0.0.0/0'
+          nextHopType: 'HubFirewall'
+        }
+      ]
     }
-    // Outbound SNAT for the jump box subnet through a static, allow-listable public IP,
-    // instead of Azure default outbound access.
-    natGateway: {}
-    // A Container Apps environment cannot have its subnet resized afterwards, so this is
-    // sized well past the handful of concurrent runners actually needed.
-    runnersSubnet: {
-      addressPrefix: '10.0.0.128/26'
+    // The transit appliance. Peering is not transitive, so without a next-hop appliance in the
+    // hub the West US 3 runners could not reach the Central US private endpoints at all.
+    //
+    // Basic, not Standard: roughly $288/month against $1,015, and Basic supports application
+    // rules, which is what the private endpoint return path depends on. Its 250 Mbps ceiling
+    // is ample for CI image pulls.
+    firewall: {
+      skuTier: 'Basic'
+      subnetAddressPrefix: '10.0.0.192/26'
+      // Basic requires a management NIC and this subnet unconditionally, regardless of
+      // forced tunnelling.
+      managementSubnetAddressPrefix: '10.0.1.0/26'
+      // Pinned to a single zone. Zone redundancy costs nothing on the firewall itself but
+      // does incur inter-zone data transfer, which is not worth paying for in a lab.
+      availabilityZones: [
+        1
+      ]
+      // Application rules, not network rules, wherever a destination can be named. Azure
+      // Firewall always SNATs traffic matched by an application rule, which is exactly what
+      // makes a private endpoint in another spoke reachable.
+      //
+      // This list is the most likely cause of a failed deployment or a runner that never
+      // registers. Firewall logs go to log-platform-cus; check them first.
+      applicationRules: [
+        {
+          // Container Apps platform requirements, for any environment.
+          // https://learn.microsoft.com/azure/container-apps/use-azure-firewall
+          name: 'allow-container-apps-platform'
+          sourceAddresses: [
+            '10.2.0.0/20'
+          ]
+          targetFqdns: [
+            'mcr.microsoft.com'
+            '*.data.mcr.microsoft.com'
+            '*.blob.core.windows.net'
+            'login.microsoft.com'
+            'login.microsoftonline.com'
+          ]
+        }
+        {
+          // The registry holding the runner image and the vault holding the GitHub App key,
+          // both reached over their private endpoints in spoke-platform-cus. Wildcards rather
+          // than exact names because both resource names carry a uniqueness suffix that is
+          // computed at deployment time.
+          name: 'allow-platform-services'
+          sourceAddresses: [
+            '10.2.0.0/20'
+          ]
+          targetFqdns: [
+            '*.azurecr.io'
+            '*.vaultcore.azure.net'
+            '*.vault.azure.net'
+          ]
+        }
+        {
+          // The runners themselves, registering with and polling GitHub.
+          name: 'allow-github'
+          sourceAddresses: [
+            '10.2.0.0/20'
+          ]
+          targetFqdns: [
+            'github.com'
+            'api.github.com'
+            '*.githubusercontent.com'
+            '*.actions.githubusercontent.com'
+            'ghcr.io'
+            '*.pkg.github.com'
+          ]
+        }
+        {
+          // The jump box, which lost its NAT gateway and now egresses here. Without this it
+          // stays reachable over Bastion but has no internet access.
+          name: 'allow-jumpbox-egress'
+          sourceAddresses: [
+            '10.0.0.64/27'
+          ]
+          targetFqdns: [
+            '*.windowsupdate.com'
+            '*.update.microsoft.com'
+            '*.delivery.mp.microsoft.com'
+            'login.microsoftonline.com'
+            'management.azure.com'
+            'aka.ms'
+            '*.blob.core.windows.net'
+            '*.githubusercontent.com'
+          ]
+        }
+      ]
+      // Service tags the Container Apps platform needs that are not addressable by FQDN.
+      networkRules: [
+        {
+          name: 'allow-container-apps-service-tags'
+          sourceAddresses: [
+            '10.2.0.0/20'
+          ]
+          destinationAddresses: [
+            'MicrosoftContainerRegistry'
+            'AzureFrontDoorFirstParty'
+            'AzureContainerRegistry'
+            'AzureActiveDirectory'
+            'AzureKeyVault'
+          ]
+          destinationPorts: [
+            '443'
+          ]
+        }
+      ]
     }
     // Management jump boxes. No public IP; Bastion is the only way in, and the jump box
     // subnet NSG admits RDP and SSH from AzureBastionSubnet alone. Sign in with Entra ID.
@@ -47,6 +166,9 @@ param hubs = [
     jumpboxes: [
       {
         name: 'vm-jb-cus-01'
+        // Preserve the existing OS disk SKU. Azure does not allow changing an attached managed
+        // disk's storage account type through a virtual machine update.
+        osDiskStorageAccountType: 'Standard_LRS'
       }
     ]
   }
@@ -114,6 +236,48 @@ param spokes = [
       }
     ]
   }
+  // The self-hosted runners. West US 3, not Central US: Container Apps has repeatedly failed
+  // to get capacity in centralus, which is what forced this spoke to exist. It peers back to
+  // hub-cus and reaches the Central US platform services through the hub firewall, so the
+  // registry, the vault and the GitHub App secret all stay where they are.
+  //
+  // Spoke 3 is 10.2.0.0/20 (10.2.0.0 - 10.2.15.255):
+  //   10.2.0.0/26    snet-runners
+  //   10.2.0.64 - 10.2.15.255   free
+  {
+    name: 'spoke-runners-wu3'
+    hubName: 'hub-cus'
+    location: 'westus3'
+    resourceGroupName: 'RG-RUNNERS-WU3'
+    addressPrefixes: [
+      '10.2.0.0/20'
+    ]
+    subnets: [
+      {
+        name: 'snet-runners'
+        // A Container Apps environment cannot have its subnet resized afterwards, and /27 is
+        // the documented minimum, so this is sized well past the handful of concurrent
+        // runners actually needed.
+        addressPrefix: '10.2.0.0/26'
+        // Mandatory for a workload profile environment.
+        delegation: 'Microsoft.App/environments'
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+        // Priorities start at 200; spoke.bicep generates the Bastion rule at 100.
+        securityRules: runnerSecurityRules('10.2.0.0/26')
+        // Everything leaves through the hub firewall, including traffic to the Central US
+        // private endpoints. Only a workload profile environment supports a route table, which
+        // is why container-apps-environment.bicep must keep its Consumption workload profile.
+        routes: [
+          {
+            name: 'default-to-firewall'
+            addressPrefix: '0.0.0.0/0'
+            nextHopType: 'HubFirewall'
+          }
+        ]
+      }
+    ]
+  }
 ]
 
 // Shared platform services. `spokeName` supplies the subscription, resource group and region,
@@ -156,9 +320,11 @@ param platform = {
   }
 }
 
-// The Container Apps environment that hosts the runner jobs, in the hub runners subnet.
+// The Container Apps environment that hosts the runner jobs. `spokeName` supplies the
+// subscription, resource group and region, so none of them is restated.
 param containerAppsEnvironment = {
-  hubName: 'hub-cus'
+  spokeName: 'spoke-runners-wu3'
+  subnetName: 'snet-runners'
 }
 
 // The GitHub App the runners authenticate as. `applicationId` is the App ID shown on the App

@@ -3,7 +3,7 @@ targetScope = 'resourceGroup'
 
 // Azure Container Apps environment that hosts the self-hosted CI/CD runner jobs.
 //
-// It is deployed into the hub's `snet-runners`, which is delegated to
+// It is deployed into a spoke's `snet-runners`, which is delegated to
 // `Microsoft.App/environments` and sized /26. That subnet cannot be resized once an
 // environment exists in it, so the environment is created against the subnet as-is and the
 // address plan must not be narrowed afterwards.
@@ -12,6 +12,11 @@ targetScope = 'resourceGroup'
 // are billed per second while a job execution runs and nothing is billed when the queue is
 // empty, which is the entire economic argument for running runners this way. A dedicated
 // profile would reserve nodes and bill continuously.
+//
+// Do not "simplify" this to a Consumption-only environment. Azure Container Apps honours a
+// user-defined route only on a workload profile environment, and the runners subnet carries a
+// 0.0.0.0/0 route to the hub firewall. Dropping the workload profile would silently strip the
+// environment of its egress path.
 
 @description('Required. Name of the Container Apps environment.')
 @minLength(1)

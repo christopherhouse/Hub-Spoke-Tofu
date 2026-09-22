@@ -8,11 +8,13 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `main.bicepparam` | Parameter values for the current deployment. |
 | `types.bicep` | Shared user-defined types (`hubType` and friends), surfaced with `@export()`. |
 | `zones.bicep` | Curated Private Link DNS zone catalog, surfaced with `@export()`. |
-| `modules/hub.bicep` | Hub virtual network, subnets, NSGs, Azure Bastion and the NAT gateway. Resource-group scope. |
-| `modules/spoke.bicep` | Spoke virtual network, subnets, per-subnet NSGs and bidirectional peering to its hub. Resource-group scope. |
+| `runner-nsg-rules.bicep` | Reviewed NSG rule set for the Container Apps runners subnet, surfaced with `@export()`. |
+| `modules/hub.bicep` | Hub virtual network, subnets, NSGs, route tables, Azure Bastion and the Azure Firewall. Resource-group scope. |
+| `modules/spoke.bicep` | Spoke virtual network, subnets, per-subnet NSGs and route tables, and bidirectional peering to its hub. Resource-group scope. |
+| `modules/firewall.bicep` | Azure Firewall and its policy, including the always-SNAT setting that makes hub transit work. Resource-group scope. |
 | `modules/log-analytics.bicep` | Shared Log Analytics workspace. Separate from `platform.bicep` purely for ordering. |
 | `modules/platform.bicep` | Shared Key Vault, container registry and the runner managed identity, with private endpoints. |
-| `modules/container-apps-environment.bicep` | Workload profile Container Apps environment in the hub runners subnet. |
+| `modules/container-apps-environment.bicep` | Workload profile Container Apps environment in the runners spoke. |
 | `modules/github-runner-job.bicep` | One event-driven self-hosted runner job, per repository. |
 
 ## Modules
@@ -24,7 +26,9 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `br/public:avm/res/network/virtual-network` | `0.9.0` |
 | `br/public:avm/res/network/network-security-group` | `0.5.3` |
 | `br/public:avm/res/network/bastion-host` | `0.8.2` |
-| `br/public:avm/res/network/nat-gateway` | `2.1.1` |
+| `br/public:avm/res/network/azure-firewall` | `0.9.2` |
+| `br/public:avm/res/network/firewall-policy` | `0.3.6` |
+| `br/public:avm/res/network/route-table` | `0.5.0` |
 | `br/public:avm/res/network/private-endpoint` | `0.12.1` |
 | `br/public:avm/res/compute/virtual-machine` | `0.22.3` |
 | `br/public:avm/res/managed-identity/user-assigned-identity` | `0.6.0` |
@@ -68,8 +72,9 @@ Each hub produces:
 - `vnet-<hub name>` with the subnets below,
 - an NSG per subnet,
 - an Azure Bastion **Standard** host and its Standard SKU public IP,
-- an optional NAT gateway and its Standard SKU static public IP, attached to the jump box
-  subnet,
+- an optional Azure Firewall, its policy, and its two Standard SKU public IPs,
+- a route table per hub subnet that declares routes, used to send outbound traffic through
+  the firewall,
 - a link from the hub VNet to every Private DNS zone, with registration disabled.
 
 ### Address plan
@@ -81,11 +86,13 @@ Hub 1 is `10.0.0.0/19` (10.0.0.0 – 10.0.31.255).
 
 | Subnet | Prefix | Notes |
 |---|---|---|
-| `AzureBastionSubnet` | `10.0.0.0/26` | Name fixed by Azure. /26 is the minimum for Bastion resources created after 2 November 2021. |
-| `snet-jumpbox` | `10.0.0.64/27` | NAT gateway attached for outbound SNAT. |
-| *(free)* | `10.0.0.96/27` | Left open so the runners subnet lands on a /26 boundary. |
-| `snet-runners` | `10.0.0.128/26` | Delegated to `Microsoft.App/environments`. NAT gateway attached. |
-| *(reserved)* | `10.0.0.192` – `10.0.31.255` | Firewall, gateway, DNS resolver, shared services. |
+| `AzureBastionSubnet` | `10.0.0.0/26` | Name fixed by Azure. /26 is the minimum for Bastion resources created after 2 November 2021. **Never give this subnet a route table.** |
+| `snet-jumpbox` | `10.0.0.64/27` | Route table sends `0.0.0.0/0` to the firewall. |
+| *(free)* | `10.0.0.96/27` | |
+| *(orphaned)* | `10.0.0.128/26` | The former `snet-runners`. **Do not reuse** — see [Known orphans](#known-orphans). |
+| `AzureFirewallSubnet` | `10.0.0.192/26` | Name fixed by Azure, /26 minimum. No NSG, no route table. |
+| `AzureFirewallManagementSubnet` | `10.0.1.0/26` | Name fixed by Azure. Required by the Basic SKU. |
+| *(reserved)* | `10.0.1.64` – `10.0.31.255` | Gateway, DNS resolver, shared services. |
 
 Spoke 1, `spoke-app-cus`, is `10.1.0.0/20` (10.1.0.0 – 10.1.15.255).
 
@@ -103,8 +110,38 @@ platform services — see [Shared platform services](#shared-platform-services).
 | `snet-privateendpoints` | `10.1.16.0/24` | Key Vault and container registry private endpoints. |
 | *(free)* | `10.1.17.0` – `10.1.31.255` | |
 
+Spoke 3, `spoke-runners-wu3`, is `10.2.0.0/20` (10.2.0.0 – 10.2.15.255), in **West US 3**. It
+hosts the self-hosted runners — see [Self-hosted runners](#self-hosted-github-actions-runners).
+
+| Subnet | Prefix | Notes |
+|---|---|---|
+| `snet-runners` | `10.2.0.0/26` | Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
+| *(free)* | `10.2.0.64` – `10.2.15.255` | |
+
 Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges
 must not overlap; that invariant is documented, not enforced in code.
+
+### Known orphans
+
+ARM incremental mode **does not delete**. Anything removed from a template stays in Azure until
+someone removes it by hand. The move of the runners out of the hub left the following behind,
+all in subscription `04769e32-22a3-4978-b533-1d6ee0c9620a`:
+
+| Resource | Location | Note |
+|---|---|---|
+| `cae-hub-cus` | `RG-CONNECTIVITY-HUB-CUS` | The Container Apps environment that never provisioned. Delete this first — it holds the subnet. |
+| `cae-hub-cus-infra-ri4g5bh35xgqk` | resource group | The environment's managed infrastructure group; goes with it. |
+| `snet-runners` (`10.0.0.128/26`) | `vnet-hub-cus` | Dropped from the template. **Do not reuse this prefix** until it is gone. |
+| `nsg-vnet-hub-cus-runners` | `RG-CONNECTIVITY-HUB-CUS` | Was attached to the subnet above. |
+| `ng-hub-cus` and its public IP | `RG-CONNECTIVITY-HUB-CUS` | The NAT gateway. The deploy *disassociates* it — a subnet property is re-declared each run, so the association does go away — but does not delete it. |
+
+Removing `snet-runners` from the hub template is safe and does not fail the deployment even
+while `cae-hub-cus` occupies it. `avm/res/network/virtual-network` deploys subnets as a serial
+copy loop of nested deployments rather than inline on the virtual network's `properties`, so
+dropping an entry from the `subnets` array simply stops declaring that child.
+
+If this kind of cleanup becomes routine, evaluate **Azure Deployment Stacks** rather than
+bolting on cleanup scripts.
 
 ### Bastion
 
@@ -120,24 +157,112 @@ present or Bastion stops receiving platform updates and connectivity breaks.
 The jump box NSG allows RDP and SSH inbound from the `AzureBastionSubnet` prefix only. No
 management port is exposed to the internet.
 
-### NAT gateway
+### Hub firewall and transit routing
 
-`natGateway` on a hub attaches a NAT gateway to `snet-jumpbox` and `snet-runners`. Omit it and
-those subnets fall back to Azure **default outbound access**, whose source address is implicit,
-unpredictable, and impossible to allow-list — and which Azure is retiring. With the NAT
-gateway, all outbound traffic from both subnets leaves through one known static public IP.
+Virtual network peering is **not transitive**. A spoke peered to the hub cannot reach another
+spoke, and there is no switch on a peering to change that. A user-defined route's next hop must
+be an *IP address*, not a virtual network, so hub transit always means putting a next-hop
+appliance in the hub. That appliance is an Azure Firewall.
 
-- It is only deployed when at least one of those subnets is. Outbound SNAT with no subnet
-  attached would just be a billed idle resource.
-- A NAT gateway is **zonal or non-zonal, never zone-redundant**. `availabilityZone` defaults
-  to `-1` (non-zonal); if it is set, the public IP is created in the same zone.
-- One Standard SKU static public IP is created by default. Supply `publicIpResourceIds` or
-  `publicIpPrefixResourceIds` instead to keep an address that is already allow-listed, or to
-  get a contiguous allow-listable range.
-- It does not change inbound access. Bastion still handles that, and the jump box NSG still
-  admits RDP and SSH only from `AzureBastionSubnet`.
-- Attaching a NAT gateway overrides any default route to the internet for the subnet, so it
-  takes precedence over a load balancer or instance-level public IP for outbound traffic.
+`firewall` on a hub deploys `avm/res/network/azure-firewall` plus
+`avm/res/network/firewall-policy` through `infra/modules/firewall.bicep`. Every subnet that
+needs egress — the jump box in the hub, the runners in West US 3 — carries a route table with
+`0.0.0.0/0` pointing at it. There are **no NAT gateways anywhere**: one appliance, one egress
+address, one set of logs.
+
+Traffic from a West US 3 runner to the Central US container registry:
+
+```
+runner 10.2.0.x
+  → UDR 0.0.0.0/0 → firewall 10.0.0.196     (WU3 spoke peered to hub)
+  → application rule matches the registry FQDN
+  → firewall SNATs the source to 10.0.0.196
+  → registry private endpoint 10.1.16.x sees source 10.0.0.196
+  → the platform spoke's existing hub peering carries the reply back
+```
+
+#### `snat.privateRanges` is load-bearing
+
+The policy sets `snat.privateRanges` to `['255.255.255.255/32']`. This is the single least
+obvious setting in the repository and it must not be "simplified".
+
+Azure Firewall does **not** SNAT when the destination is an RFC 1918 address. Left at that
+default, the runner above would arrive at the private endpoint with its own `10.2.x.x` source
+address and the endpoint would have no route back, because the two spokes are not peered to
+each other. `255.255.255.255/32` is the documented *always SNAT* value: the endpoint then sees
+the firewall's private IP, which its own hub peering already routes to.
+
+The consequence is that **`spoke-platform-cus` needs no route table and no change to
+`privateEndpointNetworkPolicies`**. No working infrastructure was modified to make transit
+work.
+
+Setting `0.0.0.0/0` here is the *opposite* setting — never SNAT — and would stop the firewall
+reaching the internet. See
+[SNAT private IP ranges](https://learn.microsoft.com/azure/firewall/snat-private-range).
+
+Application rules always SNAT, which is why the policy prefers them over network rules
+wherever a destination can be named by FQDN.
+
+#### Basic SKU
+
+Basic is roughly $288/month against $1,015 for Standard, and supports application rules, which
+is what the design depends on. Its 250 Mbps ceiling is ample for CI image pulls. Basic requires
+a management NIC and an `AzureFirewallManagementSubnet` unconditionally, so both are always
+deployed.
+
+#### Two subnets that must never get a route table
+
+- **`AzureBastionSubnet`.** Bastion requires direct outbound internet access and breaks under
+  forced tunnelling. A `0.0.0.0/0` route here is the fastest way to lock yourself out of the
+  jump box.
+- **`AzureFirewallSubnet`.** A default route here *is* forced tunnelling, and would blackhole
+  the firewall's own egress.
+
+Neither subnet accepts routes from the parameter file. The guard is structural in
+`hub.bicep`, not a convention someone has to remember.
+
+#### The allow-list is the top operational risk
+
+Every egress path now depends on one policy, including the jump box's. The rules in
+`main.bicepparam` cover the documented Container Apps requirements
+([use Azure Firewall with Container Apps](https://learn.microsoft.com/azure/container-apps/use-azure-firewall)),
+GitHub, the platform registry and vault, and Windows Update for the jump box.
+
+If a runner never registers or the jump box loses internet access, **check the firewall logs
+first** — they go to `log-platform-cus`. A bad rule set costs a fix-up deploy, not a lock-out:
+the jump box stays reachable over Bastion regardless, because Bastion does not depend on the
+jump box's egress path.
+
+### Route tables
+
+Both `hub.bicep` and `spoke.bicep` create a route table for any subnet that declares `routes`,
+and only for such a subnet. An empty route table is not inert — it is one more resource to
+reason about — and a subnet with no user-defined routes behaves correctly on the system routes
+alone.
+
+Routes are declared symbolically so no IP address is hand-copied into the parameter file:
+
+```bicep
+routes: [
+  {
+    name: 'default-to-firewall'
+    addressPrefix: '0.0.0.0/0'
+    nextHopType: 'HubFirewall'
+  }
+]
+```
+
+`HubFirewall` is resolved to `VirtualAppliance` plus the firewall's private IP by the module.
+
+Hub and spoke resolve that address differently, and the difference is deliberate:
+
+- **Spokes** read the address from the hub module's `firewallPrivateIp` output. Spokes deploy
+  after hubs, so the real value is available.
+- **The hub** *computes* it, as `cidrHost(firewallSubnetPrefix, 3)`. It has to: a route table
+  must exist before the virtual network that references it, and the firewall cannot exist
+  before its subnet does, so reading the output inside the hub would be a cycle. Azure reserves
+  the first four addresses of a subnet and the firewall takes the first assignable one, which
+  is the subnet base + 4 — `10.0.0.196` for `10.0.0.192/26`.
 
 ### Jump boxes
 
@@ -252,8 +377,14 @@ virtualisation, not a template change.
 
 ### Runners subnet
 
-`snet-runners` hosts the Azure Container Apps workload profile environment that runs the
-self-hosted GitHub Actions runners. See [Self-hosted runners](#self-hosted-runners) below.
+`snet-runners` in `spoke-runners-wu3` hosts the Azure Container Apps workload profile
+environment that runs the self-hosted GitHub Actions runners. See
+[Self-hosted runners](#self-hosted-runners) below.
+
+It is in **West US 3, not Central US**. Container Apps repeatedly failed to get capacity in
+`centralus` — `ManagedEnvironmentCapacityHeavyUsageError` — which is what forced the spoke to
+exist. It is also the correct placement on its own merits: a hub is a connectivity landing
+zone and should not host workload compute.
 
 - Delegation to `Microsoft.App/environments` is mandatory for a workload profile environment,
   and the subnet is dedicated to it.
@@ -261,14 +392,18 @@ self-hosted GitHub Actions runners. See [Self-hosted runners](#self-hosted-runne
   workload profile nodes or 250 consumption replicas. It is oversized on purpose: **an
   environment's subnet cannot be resized once the environment exists**, so growing later means
   rebuilding the environment.
-- Its NSG states the Container Apps outbound requirements explicitly, plus HTTPS to the
-  internet for GitHub. No deny rule is added: the platform default rules already block inbound
-  from the internet.
-- The hub NAT gateway serves this subnet as well as the jump box subnet, so every runner's
-  outbound traffic leaves from one static, allow-listable address. That is what makes it
-  possible to put these runners in front of an IP-restricted endpoint later.
-- `privatelink.centralus.azurecontainerapps.io` is already in the zone catalog and linked to
-  the hub, so an internal environment reached through a private endpoint resolves correctly.
+- Its NSG rules come from `infra/runner-nsg-rules.bicep`, imported by `main.bicepparam`. They
+  state the Container Apps outbound requirements explicitly, plus HTTPS to the internet for
+  GitHub, at priorities 200–280. No deny rule is added: the platform default rules already
+  block inbound from the internet.
+- A route table sends `0.0.0.0/0` to the hub firewall, so every runner's outbound traffic
+  leaves from one static, allow-listable address, and traffic to the Central US private
+  endpoints transits the hub. **Only a workload profile environment honours a user-defined
+  route**, which is why `container-apps-environment.bicep` must keep its Consumption workload
+  profile.
+- `privatelink.westus3.azurecontainerapps.io` is in
+  `additionalPrivateLinkPrivateDnsZonesToInclude`, because the zone catalog resolves
+  `{regionName}` from the root `location` parameter only.
 
 ## Spokes
 
@@ -534,9 +669,8 @@ than pointing at nothing.
 
 Two resources are **not** covered:
 
-- **NAT gateway.** `avm/res/network/nat-gateway:2.1.1` has no `diagnosticSettings` parameter.
-  The diagnostics are attached to its public IP instead, which is where SNAT port exhaustion
-  would actually show up.
+- **Firewall public IPs.** Diagnostics are attached to the firewall itself, which is where
+  rule hits and denials show up. Its public IPs carry no separate diagnostic setting.
 - **Jump box guest logs.** A diagnostic setting carries platform logs only. Windows event logs
   and performance counters need the Azure Monitor Agent plus a Data Collection Rule, which this
   repository does not deploy. `avm/res/compute/virtual-machine` exposes
@@ -552,7 +686,7 @@ carries no credential and routes through an ordinary diagnostic setting instead.
 ## Self-hosted runners
 
 Self-hosted GitHub Actions runners run as **event-driven Container Apps jobs** on the
-Consumption workload profile, in the hub's `snet-runners`. A KEDA `github-runner` scale rule
+Consumption workload profile, in `snet-runners` in `spoke-runners-wu3` (West US 3). A KEDA `github-runner` scale rule
 polls GitHub for queued workflow jobs and starts a replica per job; idle jobs scale to zero and
 cost nothing.
 
@@ -600,7 +734,7 @@ leave offline runners to accumulate.
 ### Only private repositories
 
 A self-hosted runner attached to a public repository executes code from any fork, on your
-network, behind your NAT gateway. The container holds the runner managed identity, which can
+network, behind your hub firewall. The container holds the runner managed identity, which can
 read the GitHub App private key from Key Vault — and that key controls every runner, not just
 the one that leaked it. Never list a public repository in `githubRunners`.
 
