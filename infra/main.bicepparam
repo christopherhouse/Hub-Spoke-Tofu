@@ -64,78 +64,50 @@ param hubs = [
       availabilityZones: [
         1
       ]
-      // Application rules, not network rules, wherever a destination can be named. Azure
-      // Firewall always SNATs traffic matched by an application rule, which is exactly what
-      // makes a private endpoint in another spoke reachable.
+      // Deliberately permissive: HTTP and HTTPS to anywhere, for the whole estate.
       //
-      // This list is the most likely cause of a failed deployment or a runner that never
-      // registers. Firewall logs go to log-platform-cus; check them first.
+      // The alternative is a curated FQDN list covering the documented Container Apps
+      // requirements, GitHub, the platform registry and vault, and Windows Update for the
+      // jump box. That is tighter but brittle - a missing entry shows up as a runner that
+      // never registers or a jump box with no internet, and every tool added to either means
+      // another rule. Not worth the debugging tax on a lab.
+      //
+      // This is still an allow-list rather than an open firewall: outbound only, ports 80 and
+      // 443 only, and every request logged to log-platform-cus. Inbound is untouched.
+      //
+      // Worth tightening if these runners ever build untrusted code. A runner with
+      // unrestricted egress is an exfiltration path for anything it can read, including the
+      // GitHub App private key in Key Vault. See "Only private repositories" in
+      // infra/README.md.
+      //
+      // Application rules, not network rules, on purpose: Azure Firewall always SNATs traffic
+      // matched by an application rule, which is what makes a private endpoint in another
+      // spoke reachable.
       applicationRules: [
         {
-          // Container Apps platform requirements, for any environment.
-          // https://learn.microsoft.com/azure/container-apps/use-azure-firewall
-          name: 'allow-container-apps-platform'
+          name: 'allow-web-outbound'
           sourceAddresses: [
+            '10.0.0.0/19'
             '10.2.0.0/20'
           ]
           targetFqdns: [
-            'mcr.microsoft.com'
-            '*.data.mcr.microsoft.com'
-            '*.blob.core.windows.net'
-            'login.microsoft.com'
-            'login.microsoftonline.com'
+            '*'
           ]
-        }
-        {
-          // The registry holding the runner image and the vault holding the GitHub App key,
-          // both reached over their private endpoints in spoke-platform-cus. Wildcards rather
-          // than exact names because both resource names carry a uniqueness suffix that is
-          // computed at deployment time.
-          name: 'allow-platform-services'
-          sourceAddresses: [
-            '10.2.0.0/20'
-          ]
-          targetFqdns: [
-            '*.azurecr.io'
-            '*.vaultcore.azure.net'
-            '*.vault.azure.net'
-          ]
-        }
-        {
-          // The runners themselves, registering with and polling GitHub.
-          name: 'allow-github'
-          sourceAddresses: [
-            '10.2.0.0/20'
-          ]
-          targetFqdns: [
-            'github.com'
-            'api.github.com'
-            '*.githubusercontent.com'
-            '*.actions.githubusercontent.com'
-            'ghcr.io'
-            '*.pkg.github.com'
-          ]
-        }
-        {
-          // The jump box, which lost its NAT gateway and now egresses here. Without this it
-          // stays reachable over Bastion but has no internet access.
-          name: 'allow-jumpbox-egress'
-          sourceAddresses: [
-            '10.0.0.64/27'
-          ]
-          targetFqdns: [
-            '*.windowsupdate.com'
-            '*.update.microsoft.com'
-            '*.delivery.mp.microsoft.com'
-            'login.microsoftonline.com'
-            'management.azure.com'
-            'aka.ms'
-            '*.blob.core.windows.net'
-            '*.githubusercontent.com'
+          protocols: [
+            {
+              protocolType: 'Http'
+              port: 80
+            }
+            {
+              protocolType: 'Https'
+              port: 443
+            }
           ]
         }
       ]
-      // Service tags the Container Apps platform needs that are not addressable by FQDN.
+      // Retained even though the rule above is permissive. An application rule only matches
+      // traffic the firewall can attribute to an FQDN, from SNI or the Host header, so
+      // Container Apps platform traffic that is not plain HTTP would not match it.
       networkRules: [
         {
           name: 'allow-container-apps-service-tags'

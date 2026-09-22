@@ -221,12 +221,28 @@ deployed.
 Neither subnet accepts routes from the parameter file. The guard is structural in
 `hub.bicep`, not a convention someone has to remember.
 
-#### The allow-list is the top operational risk
+#### The allow-list
 
-Every egress path now depends on one policy, including the jump box's. The rules in
-`main.bicepparam` cover the documented Container Apps requirements
+Every egress path now depends on one policy, including the jump box's.
+
+The policy in `main.bicepparam` is deliberately permissive: **HTTP and HTTPS to any
+destination**, from the hub and the runners spoke. This is a lab trade-off. A curated FQDN list
+— the documented Container Apps requirements
 ([use Azure Firewall with Container Apps](https://learn.microsoft.com/azure/container-apps/use-azure-firewall)),
-GitHub, the platform registry and vault, and Windows Update for the jump box.
+GitHub, the platform registry and vault, Windows Update — is tighter, but a missing entry shows
+up as a runner that never registers or a jump box with no internet, and every new tool means
+another rule.
+
+It is still an allow-list rather than an open firewall: outbound only, ports 80 and 443 only,
+and every request logged. Inbound is untouched.
+
+**Tighten it if these runners ever build untrusted code.** A runner with unrestricted egress is
+an exfiltration path for anything it can read, including the GitHub App private key in Key
+Vault — see [Only private repositories](#only-private-repositories).
+
+The service-tag network rules are kept alongside it. An application rule only matches traffic
+the firewall can attribute to an FQDN, from SNI or the Host header, so Container Apps platform
+traffic that is not plain HTTP would not match the permissive rule.
 
 If a runner never registers or the jump box loses internet access, **check the firewall logs
 first** — they go to `log-platform-cus`. A bad rule set costs a fix-up deploy, not a lock-out:
