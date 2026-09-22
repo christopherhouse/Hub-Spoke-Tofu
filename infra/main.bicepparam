@@ -17,10 +17,7 @@ param location = 'centralus'
 //   10.0.0.0/26    AzureBastionSubnet   Azure minimum is /26
 //   10.0.0.64/27   snet-jumpbox
 //   10.0.0.96/27   free
-//   10.0.0.128/26  ORPHANED - DO NOT REUSE. The former snet-runners. Dropped from this
-//                  template when the runners moved to spoke-runners-wu3, but still present in
-//                  Azure and still occupied by the failed cae-hub-cus environment. See the
-//                  Known orphans section of infra/README.md.
+//   10.0.0.128/26  free                 the former snet-runners, deleted with its environment
 //   10.0.0.192/26  AzureFirewallSubnet  fixed name, Azure minimum is /26
 //   10.0.1.0/26    AzureFirewallManagementSubnet  fixed name, required by the Basic SKU
 //   10.0.1.64 - 10.0.31.255             reserved for gateway and DNS resolver

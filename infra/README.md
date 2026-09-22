@@ -89,7 +89,7 @@ Hub 1 is `10.0.0.0/19` (10.0.0.0 – 10.0.31.255).
 | `AzureBastionSubnet` | `10.0.0.0/26` | Name fixed by Azure. /26 is the minimum for Bastion resources created after 2 November 2021. **Never give this subnet a route table.** |
 | `snet-jumpbox` | `10.0.0.64/27` | Route table sends `0.0.0.0/0` to the firewall. |
 | *(free)* | `10.0.0.96/27` | |
-| *(orphaned)* | `10.0.0.128/26` | The former `snet-runners`. **Do not reuse** — see [Known orphans](#known-orphans). |
+| *(free)* | `10.0.0.128/26` | The former `snet-runners`, deleted with its Container Apps environment. |
 | `AzureFirewallSubnet` | `10.0.0.192/26` | Name fixed by Azure, /26 minimum. No NSG, no route table. |
 | `AzureFirewallManagementSubnet` | `10.0.1.0/26` | Name fixed by Azure. Required by the Basic SKU. |
 | *(reserved)* | `10.0.1.64` – `10.0.31.255` | Gateway, DNS resolver, shared services. |
@@ -121,24 +121,24 @@ hosts the self-hosted runners — see [Self-hosted runners](#self-hosted-github-
 Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges
 must not overlap; that invariant is documented, not enforced in code.
 
-### Known orphans
+### Orphans after a removal
 
-ARM incremental mode **does not delete**. Anything removed from a template stays in Azure until
-someone removes it by hand. The move of the runners out of the hub left the following behind,
-all in subscription `04769e32-22a3-4978-b533-1d6ee0c9620a`:
+ARM incremental mode **does not delete**. Anything removed from a template stays in Azure
+until someone removes it by hand, so every removal owes a cleanup step.
 
-| Resource | Location | Note |
-|---|---|---|
-| `cae-hub-cus` | `RG-CONNECTIVITY-HUB-CUS` | The Container Apps environment that never provisioned. Delete this first — it holds the subnet. |
-| `cae-hub-cus-infra-ri4g5bh35xgqk` | resource group | The environment's managed infrastructure group; goes with it. |
-| `snet-runners` (`10.0.0.128/26`) | `vnet-hub-cus` | Dropped from the template. **Do not reuse this prefix** until it is gone. |
-| `nsg-vnet-hub-cus-runners` | `RG-CONNECTIVITY-HUB-CUS` | Was attached to the subnet above. |
-| `ng-hub-cus` and its public IP | `RG-CONNECTIVITY-HUB-CUS` | The NAT gateway. The deploy *disassociates* it — a subnet property is re-declared each run, so the association does go away — but does not delete it. |
+Removing `snet-runners` from the hub template was safe and did not fail the deployment even
+while the failed `cae-hub-cus` still occupied it. `avm/res/network/virtual-network` deploys
+subnets as a serial copy loop of nested deployments rather than inline on the virtual network's
+`properties`, so dropping an entry from the `subnets` array simply stops declaring that child.
 
-Removing `snet-runners` from the hub template is safe and does not fail the deployment even
-while `cae-hub-cus` occupies it. `avm/res/network/virtual-network` deploys subnets as a serial
-copy loop of nested deployments rather than inline on the virtual network's `properties`, so
-dropping an entry from the `subnets` array simply stops declaring that child.
+The orphans left by the move of the runners out of the hub — `cae-hub-cus` and its managed
+infrastructure resource group, `snet-runners` (`10.0.0.128/26`), `nsg-vnet-hub-cus-runners`,
+and `ng-hub-cus` with its public IP — **have been deleted**. Delete order matters: the
+environment holds the subnet, and the subnet holds the NSG.
+
+Note the one thing incremental mode *does* remove: a property of a re-declared resource. The
+NAT gateway association was a property of `snet-jumpbox`, which is re-declared every run, so
+the deployment disassociated it even though it could not delete the gateway.
 
 If this kind of cleanup becomes routine, evaluate **Azure Deployment Stacks** rather than
 bolting on cleanup scripts.
