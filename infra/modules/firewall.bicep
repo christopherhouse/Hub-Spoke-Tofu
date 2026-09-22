@@ -98,6 +98,10 @@ module firewallPolicy 'br/public:avm/res/network/firewall-policy:0.3.6' = {
     name: 'afwp-${name}'
     location: location
     tier: skuTier
+    // The AVM defaults this to 'Deny'. Threat intelligence-based filtering is a Standard and
+    // Premium feature, and a Basic policy that sets it at all is rejected outright with
+    // `FirewallPolicyHigherTierOnlyProperties`.
+    threatIntelMode: skuTier == 'Basic' ? 'Off' : 'Deny'
     tags: tags
     enableTelemetry: enableTelemetry
     // Load-bearing, and the single least obvious setting in this repository.

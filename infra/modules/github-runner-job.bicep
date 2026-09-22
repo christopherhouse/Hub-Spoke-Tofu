@@ -173,7 +173,10 @@ module job 'br/public:avm/res/app/job:0.7.2' = {
         resources: {
           // On the Consumption profile these are not free choices: memory in GiB must be
           // exactly twice the CPU count, or the job is rejected at deployment.
-          cpu: json(runner.?cpu ?? '1.0')
+          // A string, not a number. `avm/res/app/job` types this as `string` and converts it
+          // itself; passing json('1.0') sends a float and fails template validation with
+          // "Expected a value of type 'String, Uri', but received a value of type 'Float'".
+          cpu: runner.?cpu ?? '1.0'
           memory: runner.?memory ?? '2Gi'
         }
         env: [
