@@ -11,11 +11,15 @@ either is a parameter change, not a template change.
 |---|---|
 | Shared Private Link DNS zone catalog | Implemented |
 | Hub VNet, subnets, NSGs and Azure Bastion Standard | Implemented |
-| NAT gateway on the jump box subnet | Implemented |
+| Azure Firewall in the hub, with transit routing from spokes | Implemented |
+| Template-managed route tables on hub and spoke subnets | Implemented |
 | Windows jump boxes in the hub, Bastion-only, Entra sign-in | Implemented |
-| Container Apps runners subnet (delegated, environment not yet deployed) | Implemented |
 | Spoke VNets and bidirectional peering, across subscriptions | Implemented |
 | Dedicated NSG on every subnet, rules set from parameters | Implemented |
+| Shared platform spoke: Log Analytics, Key Vault, container registry | Implemented |
+| Diagnostics from every supported resource to the shared workspace | Implemented |
+| Self-hosted GitHub Actions runners on Container Apps jobs | Implemented |
+| Self-hosted Azure DevOps agents | Not started |
 | GitHub Actions deploy workflow | Implemented |
 | CI/CD deployment identity (OIDC, no secrets) | Implemented |
 
@@ -27,18 +31,29 @@ infra/
   main.bicepparam    parameter values
   types.bicep        shared user-defined types, e.g. hubType (@export)
   zones.bicep        curated Private Link DNS zone catalog (@export)
+  runner-nsg-rules.bicep   NSG rules for the Container Apps runners subnet (@export)
   bootstrap/
     main.bicep       deployment identity and its RBAC, deployed by hand, never by CI
     main.bicepparam
     modules/
-      subscription-contributor.bicep   Contributor for the identity on one subscription
+      subscription-role-assignment.bicep   one role for the identity on one subscription
   modules/
-    hub.bicep        hub VNet, subnets, NSGs, Azure Bastion and the jump box NAT gateway
-    spoke.bicep      spoke VNet, subnets, per-subnet NSGs and peering to its hub
+    hub.bicep        hub VNet, subnets, NSGs, route tables, Azure Bastion and Azure Firewall
+    spoke.bicep      spoke VNet, subnets, per-subnet NSGs and route tables, peering to its hub
+    firewall.bicep   Azure Firewall and its policy, including the always-SNAT setting
+    log-analytics.bicep              shared workspace, deployed before anything reports to it
+    platform.bicep                   Key Vault, container registry and the runner identity
+    container-apps-environment.bicep runner environment in the runners spoke
+    github-runner-job.bicep          one event-driven runner job per repository
   README.md
+images/
+  github-runner/     Dockerfile and entrypoint for the self-hosted runner image
 bicepconfig.json     Bicep linter configuration
 .github/
+  scripts/onboard_runner.py
   workflows/deploy.yml
+  workflows/build-runner-image.yml
+  workflows/onboard-runner.yml
   copilot-instructions.md
 ```
 
@@ -59,8 +74,9 @@ Requires Azure CLI with the Bicep extension.
 
 ### Subscription prerequisite: public IP allocation
 
-Bastion and the NAT gateway each need a public IP. Some subscriptions cannot allocate one
-until the `AllowBringYourOwnPublicIpAddress` feature is registered, and fail with:
+Bastion needs one public IP and the Azure Firewall needs two. Some subscriptions cannot
+allocate any until the `AllowBringYourOwnPublicIpAddress` feature is registered, and fail
+with:
 
 ```
 SubscriptionNotRegisteredForFeature - Subscription ... is not registered for feature
@@ -84,8 +100,9 @@ surface this, because the check happens when the resource is actually created.
 
 The workflow deploys as `id-hub-spoke-iac-cicd`, which holds Contributor only on the
 subscriptions listed in `infra/bootstrap/main.bicepparam`. Placing a hub or spoke in a new
-subscription therefore needs one manual step first — the identity is deliberately **not**
-User Access Administrator, so it cannot grant itself access.
+subscription therefore needs one manual step first — the identity holds only a narrowly
+conditioned **Role Based Access Control Administrator** grant, limited to assigning `AcrPull`
+and `Key Vault Secrets User`, so it cannot widen its own access.
 
 1. Add the subscription ID to `targetSubscriptionIds` in `infra/bootstrap/main.bicepparam`.
 2. Redeploy the bootstrap root **by hand**, from an account with Owner or User Access
@@ -112,6 +129,17 @@ Preflight fails without it, and `what-if` does not surface it:
 az feature register --namespace Microsoft.Compute --name EncryptionAtHost
 az feature show --namespace Microsoft.Compute --name EncryptionAtHost --query properties.state
 az provider register --namespace Microsoft.Compute
+```
+
+### Subscription prerequisite: resource providers
+
+The platform spoke and the runner environment need two providers registered. Like the feature
+flags above, `what-if` does **not** surface a missing registration:
+
+```powershell
+az provider register --namespace Microsoft.App
+az provider register --namespace Microsoft.OperationalInsights
+az provider register --namespace Microsoft.ContainerRegistry
 ```
 
 ### Manual step: jump box sign-in

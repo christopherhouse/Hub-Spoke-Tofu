@@ -4,8 +4,9 @@ targetScope = 'subscription'
 // and grants it Contributor on every subscription that hubs and spokes target.
 //
 // This is deployed ONCE, BY HAND, and again whenever `targetSubscriptionIds` changes. CI must
-// never deploy it: the deployment identity cannot create itself, and it is deliberately not
-// User Access Administrator, so it cannot grant itself access to a new subscription either.
+// never deploy it: the deployment identity cannot create itself, and it holds only a narrowly
+// conditioned Role Based Access Control Administrator grant, so it cannot widen its own access
+// or grant itself access to a new subscription either.
 // The pull request workflow builds this template so it cannot rot, but only
 // infra/main.bicepparam is ever deployed by the workflow.
 //
@@ -65,16 +66,61 @@ param tags object?
 @description('Optional. Enable or disable Azure Verified Module telemetry.')
 param enableTelemetry bool = true
 
-// Contributor. Sufficient for everything infra/main.bicep creates: resource groups, virtual
-// networks, NSGs, Bastion, public IPs, NAT gateways, peerings, and Private DNS zones with
-// links. The templates create no role assignments, so User Access Administrator is
-// deliberately NOT granted.
+// Contributor. Sufficient for everything infra/main.bicep creates other than role assignments:
+// resource groups, virtual networks, NSGs, Bastion, public IPs, NAT gateways, peerings, Private
+// DNS zones with links, Log Analytics, Key Vault, the container registry and Container Apps.
+// Role assignments are covered separately below, by a conditioned grant rather than by User
+// Access Administrator.
 var contributorRoleDefinitionGuid = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
 
 var contributorRoleDefinitionId = subscriptionResourceId(
   'Microsoft.Authorization/roleDefinitions',
   contributorRoleDefinitionGuid
 )
+
+// Role Based Access Control Administrator, not User Access Administrator.
+//
+// infra/main.bicep now creates two role assignments of its own: it grants the runner managed
+// identity AcrPull on the shared container registry and Key Vault Secrets User on the shared
+// vault. Contributor explicitly excludes roleAssignments/write, so without this the deployment
+// fails at the first assignment.
+//
+// The grant is narrowed by an ABAC condition to those two role definitions and nothing else.
+// The identity therefore still cannot make itself, or anything else, an Owner. That is the
+// whole point: an unconditioned User Access Administrator grant would let a compromised
+// workflow escalate to full control of the subscription.
+var rbacAdministratorRoleDefinitionGuid = 'f58310d9-a9f6-439a-9e8d-f62e7b41a168'
+
+// AcrPull (7f951dda-4ed3-4680-a7ca-43fe172d538d) lets a runner replica pull its image from the
+// shared registry. Key Vault Secrets User (4633458b-17de-408a-b874-0445c86b69e6) lets it read
+// the GitHub App private key. Those two GUIDs are the entire allow list.
+//
+// Both halves of the condition are needed. The first restricts which role a new assignment may
+// grant; the second restricts which existing assignments may be deleted. Without the delete
+// half the identity could remove an Owner assignment it is not allowed to create.
+//
+// The GUIDs are written out literally because a Bicep multi-line string does not interpolate.
+var assignableRoleDefinitionsCondition = '''
+(
+ (
+  !(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})
+ )
+ OR
+ (
+  @Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals{7f951dda-4ed3-4680-a7ca-43fe172d538d, 4633458b-17de-408a-b874-0445c86b69e6}
+ )
+)
+AND
+(
+ (
+  !(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})
+ )
+ OR
+ (
+  @Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals{7f951dda-4ed3-4680-a7ca-43fe172d538d, 4633458b-17de-408a-b874-0445c86b69e6}
+ )
+)
+'''
 
 // Immutable subject prefix. This repository has `use_immutable_subject` enabled, so the token
 // GitHub presents carries `<name>@<numeric id>` for both the owner and the repository rather
@@ -193,7 +239,7 @@ var additionalTargetSubscriptionIds = filter(
   id => id != subscription().subscriptionId
 )
 
-module targetSubscriptionContributor 'modules/subscription-contributor.bicep' = [
+module targetSubscriptionContributor 'modules/subscription-role-assignment.bicep' = [
   for targetSubscriptionId in additionalTargetSubscriptionIds: {
     name: 'deploy-cicd-rbac-${uniqueString(targetSubscriptionId)}'
     scope: subscription(targetSubscriptionId)
@@ -201,6 +247,32 @@ module targetSubscriptionContributor 'modules/subscription-contributor.bicep' = 
       principalId: deploymentIdentity.outputs.principalId
       identityResourceId: deploymentIdentityResourceIdValue
       roleDefinitionGuid: contributorRoleDefinitionGuid
+    }
+  }
+]
+
+// The conditioned Role Based Access Control Administrator grant, on every subscription the
+// identity deploys into. Unlike Contributor above, the subscription this template targets is
+// included: the shared platform services, and therefore the role assignments, usually live
+// there. The assignment name is a guid of a different role definition, so it cannot collide
+// with the Contributor assignment on the same scope.
+var allTargetSubscriptionIds = union(
+  [
+    subscription().subscriptionId
+  ],
+  additionalTargetSubscriptionIds
+)
+
+module targetSubscriptionRbacAdministrator 'modules/subscription-role-assignment.bicep' = [
+  for targetSubscriptionId in allTargetSubscriptionIds: {
+    name: 'deploy-cicd-rbacadmin-${uniqueString(targetSubscriptionId)}'
+    scope: subscription(targetSubscriptionId)
+    params: {
+      principalId: deploymentIdentity.outputs.principalId
+      identityResourceId: deploymentIdentityResourceIdValue
+      roleDefinitionGuid: rbacAdministratorRoleDefinitionGuid
+      condition: assignableRoleDefinitionsCondition
+      assignmentDescription: 'Lets GitHub Actions grant the runner identity AcrPull and Key Vault Secrets User, and nothing else.'
     }
   }
 ]
@@ -221,12 +293,7 @@ output tenantId string = tenant().tenantId
 output subscriptionId string = subscription().subscriptionId
 
 @description('Every subscription the deployment identity holds Contributor on. A hub or spoke placed outside these cannot be deployed by the workflow.')
-output grantedSubscriptionIds string[] = union(
-  [
-    subscription().subscriptionId
-  ],
-  additionalTargetSubscriptionIds
-)
+output grantedSubscriptionIds string[] = allTargetSubscriptionIds
 
 @description('The OIDC subjects trusted by the identity. Useful for confirming what the workflow can present.')
 output federatedCredentialSubjects string[] = [

@@ -1,0 +1,111 @@
+name: Onboard runner repository
+
+# Adds a repository to infra/main.bicepparam and opens a pull request.
+#
+# This exists because onboarding is otherwise the one part of the design that is not a
+# parameter change you would want to make by hand: the entry is small but easy to get subtly
+# wrong, and it must land through review rather than direct on main.
+#
+# It does NOT install the GitHub App. A GitHub App installation is account-level configuration
+# that no API reachable from here can change on your behalf, so selecting the repository in the
+# App installation stays a manual step. See infra/README.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: 'Repository to onboard, as owner/name. Must be private.'
+        required: true
+        type: string
+      labels:
+        description: 'Extra runner labels, comma separated. Workflows select the runner with a matching runs-on.'
+        required: false
+        default: ''
+        type: string
+      max_executions:
+        description: 'Maximum concurrent workflow jobs for this repository.'
+        required: false
+        default: '5'
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: onboard-runner
+  cancel-in-progress: false
+
+jobs:
+  onboard:
+    name: Open onboarding pull request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Refuse public repositories
+        # The visibility rule is enforced here rather than left to the checklist in the pull
+        # request body, because "confirm it is private" is exactly the kind of check that gets
+        # ticked without looking on the fifth repository someone onboards.
+        #
+        # GITHUB_TOKEN is scoped to this repository, so a private repository on the same
+        # account returns 404 and cannot be positively confirmed from here. That asymmetry is
+        # fine: a successful read proving `private: false` is the dangerous case, and it is the
+        # one this blocks. A 404 is reported rather than treated as approval.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+        run: |
+          set -euo pipefail
+
+          if visibility="$(gh api "repos/$REPOSITORY" --jq '.private' 2>/dev/null)"; then
+            if [ "$visibility" = 'false' ]; then
+              echo "::error::$REPOSITORY is public. A self-hosted runner on a public repository executes pull request code from any fork, inside the hub virtual network, on a container holding the runner managed identity. That identity can read the GitHub App private key from Key Vault, which controls every runner. Onboard a private repository instead."
+              exit 1
+            fi
+            echo "$REPOSITORY is private."
+          else
+            echo "::warning::Could not read $REPOSITORY with this repository's token, which is expected for a private repository on this account. Visibility was not positively confirmed - check it before merging."
+          fi
+
+      - name: Add the repository to main.bicepparam
+        id: edit
+        env:
+          REPOSITORY: ${{ inputs.repository }}
+          LABELS: ${{ inputs.labels }}
+          MAX_EXECUTIONS: ${{ inputs.max_executions }}
+        run: python3 .github/scripts/onboard_runner.py
+
+      - name: Validate the parameter file still builds
+        if: steps.edit.outputs.changed == 'true'
+        run: az bicep build-params --file infra/main.bicepparam --stdout > /dev/null
+
+      - name: Open a pull request
+        if: steps.edit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ inputs.repository }}
+          BRANCH: ${{ steps.edit.outputs.branch }}
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -b "$BRANCH"
+          git add infra/main.bicepparam
+          git commit -m "feat(runners): onboard $REPOSITORY"
+          git push --set-upstream origin "$BRANCH"
+
+          gh pr create \
+            --title "feat(runners): onboard $REPOSITORY" \
+            --body "$(cat <<EOF
+          Adds a self-hosted runner Container Apps job for \`$REPOSITORY\`.
+
+          Before merging, confirm:
+
+          - [ ] \`$REPOSITORY\` is **private**. Checked automatically when this repository's token can read it; a private repository returns 404, so confirm it by hand.
+          - [ ] The GitHub App is installed on the account and \`$REPOSITORY\` is selected in that installation.
+          - [ ] The \`what-if\` on this pull request shows one new \`Microsoft.App/jobs\` resource and nothing else.
+          EOF
+          )"

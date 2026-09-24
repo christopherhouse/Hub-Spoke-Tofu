@@ -1,6 +1,6 @@
 targetScope = 'resourceGroup'
 
-import { hubBastionType, hubNatGatewayType, hubSubnetType, jumpboxType, hubVirtualNetworkName, subnetNetworkSecurityGroupName, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
+import { hubBastionType, hubFirewallType, hubSubnetType, jumpboxType, hubVirtualNetworkName, subnetNetworkSecurityGroupName, subnetRouteTableName, subnetRouteType, defaultPrivateEndpointNetworkPolicies } from '../types.bicep'
 
 // Hub network for the hub-and-spoke topology.
 //
@@ -27,14 +27,14 @@ param bastion hubBastionType?
 @description('Optional. Subnet for management jump boxes. Omit to deploy the hub without one.')
 param jumpboxSubnet hubSubnetType?
 
-@description('Optional. NAT gateway attached to the jump box subnet. Omit to deploy the hub without one.')
-param natGateway hubNatGatewayType?
-
-@description('Optional. Subnet delegated to `Microsoft.App/environments` for the Container Apps environment that hosts self-hosted GitHub Actions runners. Omit to deploy the hub without one.')
-param runnersSubnet hubSubnetType?
+@description('Optional. Azure Firewall for the hub. It is the next hop that makes spoke-to-spoke transit and centralised egress work. Omit to deploy the hub without one.')
+param firewall hubFirewallType?
 
 @description('Optional. Management jump boxes. Each lands in the jump box subnet with no public IP. Requires `jumpboxSubnet`.')
 param jumpboxes jumpboxType[] = []
+
+@description('Optional. Resource ID of the shared Log Analytics workspace that receives diagnostics from every hub resource. Empty to create no diagnostic settings. The workspace must already exist, because a diagnostic setting naming one that does not fails the deployment.')
+param logAnalyticsWorkspaceResourceId string = ''
 
 @description('Optional. Tags applied to every resource in the hub.')
 param tags object?
@@ -44,27 +44,69 @@ param enableTelemetry bool = true
 
 var bastionEnabled = bastion != null && (bastion.?enabled ?? true)
 var jumpboxEnabled = jumpboxSubnet != null && (jumpboxSubnet.?enabled ?? true)
-var runnersEnabled = runnersSubnet != null && (runnersSubnet.?enabled ?? true)
+var firewallEnabled = firewall != null && (firewall.?enabled ?? true)
+
+// One diagnostic setting shape, reused by every module below, so that turning diagnostics on
+// or off is a single decision rather than a per-resource one.
+var hubDiagnosticSettings = empty(logAnalyticsWorkspaceResourceId)
+  ? null
+  : [
+      {
+        name: 'send-to-log-analytics'
+        workspaceResourceId: logAnalyticsWorkspaceResourceId
+      }
+    ]
+
+// The NAT gateway that used to give the jump box subnet its outbound address is gone. Every
+// subnet that needs egress now routes 0.0.0.0/0 to the firewall, which SNATs to its own public
+// IP, so there is one egress point and one address to allow-list rather than two.
+var virtualNetworkName = hubVirtualNetworkName(name)
+var jumpboxSubnetName = jumpboxSubnet.?name ?? 'snet-jumpbox'
+var firewallName = firewall.?name ?? 'afw-${name}'
+var firewallSkuTier = firewall.?skuTier ?? 'Basic'
+
+// Azure fixes these names. A Bastion host of any SKU other than Developer will not deploy
+// without a subnet called exactly AzureBastionSubnet, and the firewall subnets are the same.
+var bastionSubnetName = 'AzureBastionSubnet'
+var firewallSubnetName = 'AzureFirewallSubnet'
+var firewallManagementSubnetName = 'AzureFirewallManagementSubnet'
+
+// The Basic SKU always deploys a management NIC and therefore always needs the management
+// subnet. Standard and Premium only need one for forced tunnelling, which this design avoids.
+var firewallManagementSubnetEnabled = firewallEnabled && firewall.?managementSubnetAddressPrefix != null
+
+// The firewall's private IP is needed to build the route tables, but the route tables have to
+// exist before the virtual network that references them, and the firewall cannot exist until
+// its subnet does - a cycle. It is broken by computing the address instead of reading it back.
+//
+// Azure reserves the first four addresses of any subnet (network, gateway, and two for DNS),
+// so the first assignable address is the subnet base plus four, and Azure Firewall takes the
+// first assignable address in AzureFirewallSubnet. `cidrHost` is zero-based from base plus
+// one, so index 3 is that address. The firewall module still outputs the real value, and that
+// is what `firewallPrivateIp` returns for callers that are not caught by the cycle.
+var firewallPrivateIpAddress = firewallEnabled ? cidrHost(firewall!.subnetAddressPrefix, 3) : ''
+
+// Routes are declared symbolically so that no IP address is written into a parameter file.
+// `HubFirewall` resolves here, at the one place that knows the address.
+func resolveRoutes(routes subnetRouteType[], firewallIpAddress string) object[] =>
+  map(routes, route => {
+    name: route.name
+    properties: {
+      addressPrefix: route.addressPrefix
+      nextHopType: route.nextHopType == 'HubFirewall' ? 'VirtualAppliance' : route.nextHopType
+      nextHopIpAddress: route.nextHopType == 'HubFirewall'
+        ? firewallIpAddress
+        : route.?nextHopIpAddress
+    }
+  })
+
+var jumpboxRoutes = jumpboxSubnet.?routes ?? []
+var jumpboxRouteTableEnabled = jumpboxEnabled && !empty(jumpboxRoutes)
 
 // A jump box needs somewhere to land. Filtering here rather than failing means a hub can carry
 // jump box definitions before the subnet exists; the jump boxes simply do not deploy, and
 // infra/README.md states the requirement.
 var jumpboxesToDeploy = jumpboxEnabled ? filter(jumpboxes, jumpbox => jumpbox.?enabled ?? true) : []
-
-// The NAT gateway exists to give the jump box subnet a predictable outbound address, so it is
-// only deployed when that subnet is.
-var natGatewayEnabled = jumpboxEnabled && natGateway != null && (natGateway.?enabled ?? true)
-
-var virtualNetworkName = hubVirtualNetworkName(name)
-var natGatewayName = natGateway.?name ?? 'ng-${name}'
-var natGatewayZone = natGateway.?availabilityZone ?? -1
-var natGatewayOwnsPublicIp = empty(natGateway.?publicIpResourceIds ?? []) && empty(natGateway.?publicIpPrefixResourceIds ?? [])
-var jumpboxSubnetName = jumpboxSubnet.?name ?? 'snet-jumpbox'
-var runnersSubnetName = runnersSubnet.?name ?? 'snet-runners'
-
-// Azure fixes this name. A Bastion host of any SKU other than Developer will not deploy
-// without a subnet called exactly AzureBastionSubnet.
-var bastionSubnetName = 'AzureBastionSubnet'
 
 // Required rules from "Configure NSG rules for Azure Bastion". Applying an NSG to the
 // AzureBastionSubnet is optional, but once one is present every rule below must exist or
@@ -75,6 +117,7 @@ module bastionNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
     name: subnetNetworkSecurityGroupName(virtualNetworkName, 'bastion')
     location: location
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     securityRules: concat(
       [
@@ -215,6 +258,7 @@ module jumpboxNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
     name: subnetNetworkSecurityGroupName(virtualNetworkName, 'jumpbox')
     location: location
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     securityRules: concat(
       bastionEnabled
@@ -243,196 +287,23 @@ module jumpboxNetworkSecurityGroup 'br/public:avm/res/network/network-security-g
   }
 }
 
-// Outbound rules follow "Network security groups for configuring a virtual network in Azure
-// Container Apps" for a workload profile environment. They are stated explicitly so the
-// environment keeps working if a deny-all rule or a firewall route is introduced later.
-// No deny rule is added here: the platform default rules already block inbound from the
-// internet, and self-hosted runners need broad outbound access to GitHub and package feeds.
-module runnersNetworkSecurityGroup 'br/public:avm/res/network/network-security-group:0.5.3' = if (runnersEnabled) {
-  name: 'nsg-${name}-runners'
+// The route table must exist before the virtual network that references it, which is why the
+// firewall private IP is computed rather than read back from the firewall module. See
+// `firewallPrivateIpAddress` above.
+//
+// No route table is ever generated for AzureBastionSubnet or AzureFirewallSubnet. Bastion
+// requires direct outbound internet access and stops working behind a default route, and a
+// default route on the firewall subnet is forced tunnelling, which would blackhole the
+// firewall's own egress. Neither subnet accepts routes from the parameter file, so this is
+// structural rather than a convention someone has to remember.
+module jumpboxRouteTable 'br/public:avm/res/network/route-table:0.5.0' = if (jumpboxRouteTableEnabled) {
+  name: 'rt-${name}-jumpbox'
   params: {
-    name: subnetNetworkSecurityGroupName(virtualNetworkName, 'runners')
+    name: subnetRouteTableName(virtualNetworkName, 'jumpbox')
     location: location
     tags: tags
     enableTelemetry: enableTelemetry
-    securityRules: concat(
-      [
-      {
-        name: 'AllowContainerAppsSubnetInbound'
-        properties: {
-          description: 'Communication between addresses inside the Container Apps subnet.'
-          access: 'Allow'
-          direction: 'Inbound'
-          priority: 100
-          protocol: '*'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: runnersSubnet!.addressPrefix
-          destinationPortRange: '*'
-        }
-      }
-      {
-        name: 'AllowAzureLoadBalancerProbeInbound'
-        properties: {
-          description: 'Azure Load Balancer probes the Container Apps backend pools.'
-          access: 'Allow'
-          direction: 'Inbound'
-          priority: 110
-          protocol: 'Tcp'
-          sourceAddressPrefix: 'AzureLoadBalancer'
-          sourcePortRange: '*'
-          destinationAddressPrefix: runnersSubnet!.addressPrefix
-          destinationPortRange: '30000-32767'
-        }
-      }
-      {
-        name: 'AllowContainerAppsSubnetOutbound'
-        properties: {
-          description: 'Communication between addresses inside the Container Apps subnet.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 100
-          protocol: '*'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: runnersSubnet!.addressPrefix
-          destinationPortRange: '*'
-        }
-      }
-      {
-        name: 'AllowMicrosoftContainerRegistryOutbound'
-        properties: {
-          description: 'Microsoft Artifact Registry, which serves the Container Apps system containers.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 110
-          protocol: 'Tcp'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'MicrosoftContainerRegistry'
-          destinationPortRange: '443'
-        }
-      }
-      {
-        name: 'AllowAzureFrontDoorFirstPartyOutbound'
-        properties: {
-          description: 'Dependency of the MicrosoftContainerRegistry service tag.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 120
-          protocol: 'Tcp'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'AzureFrontDoor.FirstParty'
-          destinationPortRange: '443'
-        }
-      }
-      {
-        name: 'AllowAzureActiveDirectoryOutbound'
-        properties: {
-          description: 'Managed identity token acquisition, including the federated identity a runner job uses.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 130
-          protocol: 'Tcp'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'AzureActiveDirectory'
-          destinationPortRange: '443'
-        }
-      }
-      {
-        name: 'AllowAzureMonitorOutbound'
-        properties: {
-          description: 'Container Apps diagnostics to Azure Monitor.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 140
-          protocol: 'Tcp'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'AzureMonitor'
-          destinationPortRange: '443'
-        }
-      }
-      {
-        name: 'AllowAzureContainerRegistryOutbound'
-        properties: {
-          description: 'Pull runner images from Azure Container Registry. Not required once the registry is reached through a private endpoint.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 150
-          protocol: 'Tcp'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'AzureContainerRegistry'
-          destinationPortRange: '443'
-        }
-      }
-      {
-        name: 'AllowAzurePlatformDnsOutbound'
-        properties: {
-          description: 'Azure DNS at 168.63.129.16. Container Apps does not function if this is denied.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 160
-          protocol: '*'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: '168.63.129.16'
-          destinationPortRange: '53'
-        }
-      }
-      {
-        name: 'AllowGitHubHttpsOutbound'
-        properties: {
-          description: 'Self-hosted runners poll GitHub and download actions and packages over HTTPS.'
-          access: 'Allow'
-          direction: 'Outbound'
-          priority: 200
-          protocol: 'Tcp'
-          sourceAddressPrefix: runnersSubnet!.addressPrefix
-          sourcePortRange: '*'
-          destinationAddressPrefix: 'Internet'
-          destinationPortRange: '443'
-        }
-      }
-      ],
-      // Appended. The Container Apps outbound requirements above are load-bearing: the
-      // environment stops functioning if any of them is displaced.
-      runnersSubnet.?securityRules ?? []
-    )
-  }
-}
-
-// A NAT gateway gives the jump box subnet explicit, static outbound SNAT instead of Azure's
-// default outbound access, which uses an unpredictable address that cannot be allow-listed and
-// is being retired. A NAT gateway is zonal or non-zonal - never zone-redundant - so its public
-// IP must sit in the same zone.
-module natGatewayResource 'br/public:avm/res/network/nat-gateway:2.1.1' = if (natGatewayEnabled) {
-  name: 'ng-${name}'
-  params: {
-    name: natGatewayName
-    location: location
-    availabilityZone: natGatewayZone
-    natGatewaySku: natGateway.?skuName ?? 'Standard'
-    idleTimeoutInMinutes: natGateway.?idleTimeoutInMinutes ?? 4
-    publicIpResourceIds: natGateway.?publicIpResourceIds
-    publicIPPrefixResourceIds: natGateway.?publicIpPrefixResourceIds
-    // Only create an address when none was supplied. A NAT gateway requires at least one
-    // Standard SKU static public IP or prefix.
-    publicIPAddresses: natGatewayOwnsPublicIp
-      ? [
-          {
-            name: 'pip-${natGatewayName}'
-            skuName: 'Standard'
-            publicIPAllocationMethod: 'Static'
-            availabilityZones: natGatewayZone == -1 ? [] : [natGatewayZone]
-          }
-        ]
-      : null
-    tags: tags
-    enableTelemetry: enableTelemetry
+    routes: resolveRoutes(jumpboxRoutes, firewallPrivateIpAddress)
   }
 }
 
@@ -443,6 +314,7 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
     location: location
     addressPrefixes: addressPrefixes
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
     subnets: concat(
       bastionEnabled
@@ -461,24 +333,52 @@ module virtualNetwork 'br/public:avm/res/network/virtual-network:0.9.0' = {
               name: jumpboxSubnetName
               addressPrefix: jumpboxSubnet!.addressPrefix
               networkSecurityGroupResourceId: jumpboxNetworkSecurityGroup!.outputs.resourceId
-              natGatewayResourceId: natGatewayEnabled ? natGatewayResource!.outputs.resourceId : null
+              // Outbound goes through the hub firewall, via a 0.0.0.0/0 route, rather than
+              // through a NAT gateway. One egress point, one allow-listable address.
+              routeTableResourceId: jumpboxRouteTableEnabled ? jumpboxRouteTable!.outputs.resourceId : null
               privateEndpointNetworkPolicies: jumpboxSubnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
             }
           ]
         : [],
-      runnersEnabled
+      // Azure fixes the name and requires /26 or larger. No NSG: Azure Firewall manages its
+      // own subnet, and applying one is unsupported.
+      firewallEnabled
         ? [
             {
-              name: runnersSubnetName
-              addressPrefix: runnersSubnet!.addressPrefix
-              networkSecurityGroupResourceId: runnersNetworkSecurityGroup!.outputs.resourceId
-              // Mandatory for a Container Apps workload profile environment.
-              delegation: 'Microsoft.App/environments'
-              privateEndpointNetworkPolicies: runnersSubnet.?privateEndpointNetworkPolicies ?? defaultPrivateEndpointNetworkPolicies
+              name: firewallSubnetName
+              addressPrefix: firewall!.subnetAddressPrefix
+            }
+          ]
+        : [],
+      firewallManagementSubnetEnabled
+        ? [
+            {
+              name: firewallManagementSubnetName
+              addressPrefix: firewall!.managementSubnetAddressPrefix!
             }
           ]
         : []
     )
+  }
+}
+
+// Deployed after the virtual network because it needs AzureFirewallSubnet to exist. Nothing
+// in the hub routes through it at deployment time, so nothing depends on it in turn; the
+// route tables use the computed address instead.
+module firewallResource 'firewall.bicep' = if (firewallEnabled) {
+  name: 'afw-${name}'
+  params: {
+    name: firewallName
+    location: location
+    virtualNetworkResourceId: virtualNetwork.outputs.resourceId
+    skuTier: firewallSkuTier
+    availabilityZones: firewall.?availabilityZones ?? []
+    applicationRules: firewall.?applicationRules ?? []
+    networkRules: firewall.?networkRules ?? []
+    snatPrivateRanges: firewall.?snatPrivateRanges ?? ['255.255.255.255/32']
+    logAnalyticsWorkspaceResourceId: logAnalyticsWorkspaceResourceId
+    tags: tags
+    enableTelemetry: enableTelemetry
   }
 }
 
@@ -498,15 +398,17 @@ module bastionHost 'br/public:avm/res/network/bastion-host:0.8.2' = if (bastionE
       name: 'pip-${bastion.?name ?? 'bas-${name}'}'
       skuName: 'Standard'
       publicIPAllocationMethod: 'Static'
+      diagnosticSettings: hubDiagnosticSettings
     }
     tags: tags
+    diagnosticSettings: hubDiagnosticSettings
     enableTelemetry: enableTelemetry
   }
 }
 
 // One module per jump box, so adding a management host is a parameter change. Each lands in
 // the jump box subnet, which is created above with an NSG that admits RDP and SSH from
-// `AzureBastionSubnet` alone, and a NAT gateway for outbound.
+// `AzureBastionSubnet` alone, and a route table that sends outbound through the firewall.
 module jumpboxVirtualMachines 'jumpbox.bicep' = [
   for jumpbox in jumpboxesToDeploy: {
     // Deployment names are capped at 64 characters, and the jump box name is capped at 15.
@@ -573,13 +475,11 @@ output jumpboxSubnetResourceId string = jumpboxEnabled
   ? resourceId('Microsoft.Network/virtualNetworks/subnets', virtualNetworkName, jumpboxSubnetName)
   : ''
 
-@description('Resource ID of the Container Apps runners subnet, or an empty string when it is not deployed. Pass this as the infrastructure subnet of the Container Apps environment.')
-output runnersSubnetResourceId string = runnersEnabled
-  ? resourceId('Microsoft.Network/virtualNetworks/subnets', virtualNetworkName, runnersSubnetName)
-  : ''
+@description('Resource ID of the Azure Firewall, or an empty string when it is not deployed.')
+output firewallResourceId string = firewallEnabled ? firewallResource!.outputs.resourceId : ''
 
-@description('Resource ID of the NAT gateway attached to the jump box subnet, or an empty string when it is not deployed.')
-output natGatewayResourceId string = natGatewayEnabled ? natGatewayResource!.outputs.resourceId : ''
+@description('Private IP address of the Azure Firewall, or an empty string when it is not deployed. This is the next hop for every route that transits the hub. Read back from the firewall itself, so a caller outside this module gets the real address rather than the computed one.')
+output firewallPrivateIp string = firewallEnabled ? firewallResource!.outputs.privateIp : ''
 
 @description('The jump boxes that were deployed, with the private IP address to connect to through Bastion.')
 output jumpboxes array = [

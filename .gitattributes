@@ -7,7 +7,14 @@
 *.yaml text eol=lf
 *.md text eol=lf
 *.json text eol=lf
+*.bicep text eol=lf
+*.bicepparam text eol=lf
 *.ps1 text eol=crlf
+
+# Container image build context. A CRLF shebang makes the kernel look for an interpreter
+# named "/usr/bin/env bash\r", which fails with a bare "no such file or directory".
+*.sh text eol=lf
+Dockerfile text eol=lf
 
 *.png binary
 *.jpg binary
