@@ -57,6 +57,7 @@ jobs:
         run: |
           az deployment sub what-if \
             --name "infra-${{ github.run_id }}" \
+            --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}" \
             --location "$DEPLOYMENT_LOCATION" \
             --parameters infra/main.bicepparam
 
@@ -79,9 +80,14 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # --subscription is passed explicitly rather than relying on the active context set by
+      # azure/login. `az deployment sub create` targets whatever subscription is active, so an
+      # unexpected context deploys a duplicate estate into the wrong subscription and reports
+      # success. defaultSubscriptionId in main.bicepparam must agree with this value.
       - name: Deploy
         run: |
           az deployment sub create \
             --name "infra-${{ github.run_id }}" \
+            --subscription "${{ vars.AZURE_SUBSCRIPTION_ID }}" \
             --location "$DEPLOYMENT_LOCATION" \
             --parameters infra/main.bicepparam

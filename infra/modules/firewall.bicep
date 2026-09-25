@@ -52,12 +52,32 @@ param enableTelemetry bool = true
 // straight to the internet.
 var managementNicRequired = skuTier == 'Basic'
 
+// `logAnalyticsDestinationType: 'Dedicated'` is not cosmetic. Left unset, the AVM default
+// sends firewall logs to the legacy `AzureDiagnostics` table, where every category is
+// squashed into a single untyped `msg_s` string. The resource-specific `AZFWApplicationRule`,
+// `AZFWNetworkRule` and `AZFWDnsQuery` tables stay empty, so every Microsoft firewall
+// workbook and every documented KQL sample returns nothing, and debugging an allow-list
+// failure means substring-matching a sentence. Dedicated gives the typed columns
+// (SourceIp, Fqdn, Action, Rule) those queries expect.
+//
+// Applied to the firewall alone. The public IPs keep the default destination: their only
+// categories are the DDoS ones, which have no resource-specific tables to promote to.
+var publicIpDiagnosticSettings = empty(logAnalyticsWorkspaceResourceId)
+  ? null
+  : [
+      {
+        name: 'send-to-log-analytics'
+        workspaceResourceId: logAnalyticsWorkspaceResourceId
+      }
+    ]
+
 var firewallDiagnosticSettings = empty(logAnalyticsWorkspaceResourceId)
   ? null
   : [
       {
         name: 'send-to-log-analytics'
         workspaceResourceId: logAnalyticsWorkspaceResourceId
+        logAnalyticsDestinationType: 'Dedicated'
       }
     ]
 
@@ -181,7 +201,7 @@ module firewall 'br/public:avm/res/network/azure-firewall:0.9.2' = {
       name: 'pip-${name}'
       skuName: 'Standard'
       publicIPAllocationMethod: 'Static'
-      diagnosticSettings: firewallDiagnosticSettings
+      diagnosticSettings: publicIpDiagnosticSettings
     }
     enableManagementNic: managementNicRequired
     managementIPAddressObject: managementNicRequired
@@ -189,7 +209,7 @@ module firewall 'br/public:avm/res/network/azure-firewall:0.9.2' = {
           name: 'pip-${name}-mgmt'
           skuName: 'Standard'
           publicIPAllocationMethod: 'Static'
-          diagnosticSettings: firewallDiagnosticSettings
+          diagnosticSettings: publicIpDiagnosticSettings
         }
       : {}
     tags: tags

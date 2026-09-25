@@ -21,6 +21,11 @@ param dnsResourceGroupName string
 @description('Required. Azure region for the deployment. Private DNS zones are global, but this sets the resource group location and is substituted into regional zone names such as Container Apps.')
 param location string
 
+@description('Required. Subscription that hosts any hub, spoke or platform component which does not name a subscription of its own. Declared rather than inferred from the deployment context on purpose: `az deployment sub create` silently targets whatever subscription the CLI happens to have active, so inferring it lets a stale context deploy a duplicate estate into the wrong subscription without any error. Pass `--subscription` as well, so the deployment and its contents agree.')
+@minLength(36)
+@maxLength(36)
+param defaultSubscriptionId string
+
 @description('Optional. Hubs to deploy. Each entry creates its own resource group, virtual network, subnets and Azure Bastion, and its virtual network is linked to every Private DNS zone. Hubs may target other subscriptions in the same tenant.')
 param hubs hubType[] = []
 
@@ -51,8 +56,11 @@ param tags object?
 @description('Optional. Enable or disable Azure Verified Module telemetry.')
 param enableTelemetry bool = true
 
+// Scoped explicitly to the declared subscription rather than defaulting to the deployment's
+// own subscription, which is whatever the CLI had active.
 module dnsResourceGroup 'br/public:avm/res/resources/resource-group:0.4.4' = {
   name: 'deploy-dns-rg'
+  scope: subscription(defaultSubscriptionId)
   params: {
     name: dnsResourceGroupName
     location: location
@@ -66,7 +74,7 @@ module dnsResourceGroup 'br/public:avm/res/resources/resource-group:0.4.4' = {
 module hubResourceGroups 'br/public:avm/res/resources/resource-group:0.4.4' = [
   for hub in hubs: {
     name: 'deploy-rg-${hub.name}'
-    scope: subscription(hub.?subscriptionId ?? subscription().subscriptionId)
+    scope: subscription(hub.?subscriptionId ?? defaultSubscriptionId)
     params: {
       name: hub.resourceGroupName
       location: hub.location
@@ -79,7 +87,7 @@ module hubResourceGroups 'br/public:avm/res/resources/resource-group:0.4.4' = [
 module hubNetworks 'modules/hub.bicep' = [
   for (hub, index) in hubs: {
     name: 'deploy-hub-${hub.name}'
-    scope: resourceGroup(hub.?subscriptionId ?? subscription().subscriptionId, hub.resourceGroupName)
+    scope: resourceGroup(hub.?subscriptionId ?? defaultSubscriptionId, hub.resourceGroupName)
     dependsOn: [
       hubResourceGroups[index]
     ]
@@ -118,8 +126,8 @@ module hubNetworks 'modules/hub.bicep' = [
 var platformSpoke = platform == null ? null : first(filter(spokes, spoke => spoke.name == platform!.spokeName))
 
 var platformSubscriptionId = platform == null
-  ? subscription().subscriptionId
-  : (platformSpoke!.?subscriptionId ?? subscription().subscriptionId)
+  ? defaultSubscriptionId
+  : (platformSpoke!.?subscriptionId ?? defaultSubscriptionId)
 
 var platformResourceGroupName = platform == null ? '' : platformSpoke!.resourceGroupName
 
@@ -176,7 +184,7 @@ var spokeHubBastionSubnetPrefixes = [
 module spokeResourceGroups 'br/public:avm/res/resources/resource-group:0.4.4' = [
   for spoke in spokes: {
     name: 'deploy-rg-${spoke.name}'
-    scope: subscription(spoke.?subscriptionId ?? subscription().subscriptionId)
+    scope: subscription(spoke.?subscriptionId ?? defaultSubscriptionId)
     params: {
       name: spoke.resourceGroupName
       location: spoke.location
@@ -191,7 +199,7 @@ module spokeResourceGroups 'br/public:avm/res/resources/resource-group:0.4.4' = 
 module spokeNetworks 'modules/spoke.bicep' = [
   for (spoke, index) in spokes: {
     name: 'deploy-spoke-${spoke.name}'
-    scope: resourceGroup(spoke.?subscriptionId ?? subscription().subscriptionId, spoke.resourceGroupName)
+    scope: resourceGroup(spoke.?subscriptionId ?? defaultSubscriptionId, spoke.resourceGroupName)
     dependsOn: [
       spokeResourceGroups[index]
       hubNetworks
@@ -202,7 +210,7 @@ module spokeNetworks 'modules/spoke.bicep' = [
       addressPrefixes: spoke.addressPrefixes
       subnets: spoke.?subnets ?? []
       hubVirtualNetworkResourceId: resourceId(
-        spokeHubs[index]!.?subscriptionId ?? subscription().subscriptionId,
+        spokeHubs[index]!.?subscriptionId ?? defaultSubscriptionId,
         spokeHubs[index]!.resourceGroupName,
         'Microsoft.Network/virtualNetworks',
         hubVirtualNetworkName(spokeHubs[index]!.name)
@@ -230,7 +238,7 @@ module spokeNetworks 'modules/spoke.bicep' = [
 var hubVirtualNetworkLinks = [
   for hub in hubs: {
     virtualNetworkResourceId: resourceId(
-      hub.?subscriptionId ?? subscription().subscriptionId,
+      hub.?subscriptionId ?? defaultSubscriptionId,
       hub.resourceGroupName,
       'Microsoft.Network/virtualNetworks',
       hubVirtualNetworkName(hub.name)
@@ -244,7 +252,7 @@ var hubVirtualNetworkLinks = [
 var spokeVirtualNetworkLinks = [
   for spoke in spokes: {
     virtualNetworkResourceId: resourceId(
-      spoke.?subscriptionId ?? subscription().subscriptionId,
+      spoke.?subscriptionId ?? defaultSubscriptionId,
       spoke.resourceGroupName,
       'Microsoft.Network/virtualNetworks',
       spokeVirtualNetworkName(spoke.name)
@@ -257,7 +265,7 @@ var spokeVirtualNetworkLinks = [
 // spokes uses resourceGroup(<subscriptionId>, <name>) here; no provider plumbing is needed.
 module privateDnsZones 'br/public:avm/ptn/network/private-link-private-dns-zones:0.7.3' = {
   name: 'deploy-private-dns-zones'
-  scope: resourceGroup(dnsResourceGroupName)
+  scope: resourceGroup(defaultSubscriptionId, dnsResourceGroupName)
   // The hub virtual networks must exist before they can be linked; the resource IDs above
   // are composed, not referenced, so the dependency has to be explicit.
   dependsOn: [
@@ -311,13 +319,13 @@ module platformServices 'modules/platform.bicep' = if (platformEnabled) {
     // overload is ambiguous in ARM - it reads the first argument as a subscription ID and fails
     // with "is not valid subscription identifier" - and Bicep does not catch it at build time.
     keyVaultPrivateDnsZoneResourceId: resourceId(
-      subscription().subscriptionId,
+      defaultSubscriptionId,
       dnsResourceGroupName,
       'Microsoft.Network/privateDnsZones',
       'privatelink.vaultcore.azure.net'
     )
     containerRegistryPrivateDnsZoneResourceId: resourceId(
-      subscription().subscriptionId,
+      defaultSubscriptionId,
       dnsResourceGroupName,
       'Microsoft.Network/privateDnsZones',
       'privatelink.azurecr.io'
@@ -344,8 +352,8 @@ var runnerSpoke = containerAppsEnvironment == null
 var containerAppsEnvironmentEnabled = containerAppsEnvironment != null && (containerAppsEnvironment!.?enabled ?? true)
 
 var runnerSpokeSubscriptionId = containerAppsEnvironmentEnabled
-  ? (runnerSpoke!.?subscriptionId ?? subscription().subscriptionId)
-  : subscription().subscriptionId
+  ? (runnerSpoke!.?subscriptionId ?? defaultSubscriptionId)
+  : defaultSubscriptionId
 
 var runnerSpokeResourceGroupName = containerAppsEnvironmentEnabled ? runnerSpoke!.resourceGroupName : ''
 
@@ -438,7 +446,7 @@ output hubs array = [
   for (hub, index) in hubs: {
     name: hub.name
     location: hub.location
-    subscriptionId: hub.?subscriptionId ?? subscription().subscriptionId
+    subscriptionId: hub.?subscriptionId ?? defaultSubscriptionId
     resourceGroupName: hub.resourceGroupName
     virtualNetworkResourceId: hubNetworks[index].outputs.virtualNetworkResourceId
     virtualNetworkName: hubNetworks[index].outputs.virtualNetworkName
@@ -458,7 +466,7 @@ output spokes array = [
     name: spoke.name
     hubName: spoke.hubName
     location: spoke.location
-    subscriptionId: spoke.?subscriptionId ?? subscription().subscriptionId
+    subscriptionId: spoke.?subscriptionId ?? defaultSubscriptionId
     resourceGroupName: spoke.resourceGroupName
     virtualNetworkResourceId: spokeNetworks[index].outputs.virtualNetworkResourceId
     virtualNetworkName: spokeNetworks[index].outputs.virtualNetworkName
