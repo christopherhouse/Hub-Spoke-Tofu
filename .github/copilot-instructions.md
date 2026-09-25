@@ -56,7 +56,7 @@ Bicep targets a scope per module, so subscriptions are data rather than configur
 
 ## Network design invariants
 
-- Hub and spoke CIDR ranges must not overlap.
+- Hub and spoke CIDR ranges must not overlap. This is enforced on every pull request by `.github/scripts/check_address_plan.py`, which validates the built parameters; `az bicep build` cannot catch it because a CIDR is just a string to the compiler. Changing the address plan means keeping that check green and updating the tables in `infra/README.md`.
 - Each spoke must reference exactly one defined hub unless a future architecture decision explicitly supports another topology.
 - Traditional bidirectional VNet peering is the current design assumption.
 - Azure Bastion Standard is created for each hub. The Developer SKU was evaluated and rejected: it does not support virtual network peering, so it can only reach virtual machines in its own VNet and cannot serve spokes.
