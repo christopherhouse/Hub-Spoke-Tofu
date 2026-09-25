@@ -9,6 +9,13 @@ param dnsResourceGroupName = 'RG-CONNECTIVITY-DNS-CUS'
 // Also substituted into regional zone names, e.g. privatelink.centralus.azurecontainerapps.io
 param location = 'centralus'
 
+// Every hub, spoke and platform component that does not name a subscription of its own lands
+// here. This is declared rather than inferred from the CLI context because `az deployment sub
+// create` silently targets whatever subscription happens to be active, and a stale context
+// will happily build a second copy of the whole estate in the wrong subscription without
+// erroring. Deploy with `--subscription` set to the same value.
+param defaultSubscriptionId = '04769e32-22a3-4978-b533-1d6ee0c9620a'
+
 // Hubs. Each entry gets its own resource group, virtual network, subnets and Bastion, and is
 // linked to every Private DNS zone automatically. Add `subscriptionId` to place a hub in
 // another subscription of the same tenant.

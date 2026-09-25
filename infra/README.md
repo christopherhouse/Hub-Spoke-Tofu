@@ -49,16 +49,60 @@ composed from AVM resource modules instead.
 |---|---|---|
 | `dnsResourceGroupName` | Yes | Resource group that holds the shared zones. |
 | `location` | Yes | Resource group location, and the region substituted into regional zone names. |
+| `defaultSubscriptionId` | Yes | Subscription hosting everything that does not name a subscription of its own. See [Subscription targeting](#subscription-targeting). |
 | `hubs` | No | `hubType[]`. One entry per hub. Each gets a resource group, VNet, subnets and Bastion, and is linked to every zone. |
 | `spokes` | No | `spokeType[]`. One entry per spoke. Each gets a resource group, VNet, subnets, a peering to its hub, and links to every zone. |
 | `virtualNetworkLinks` | No | Extra VNets to link, beyond the hubs, which are linked automatically. |
 | `additionalPrivateLinkPrivateDnsZonesToInclude` | No | Extra zones beyond the curated catalog. |
 | `platform` | No | `platformType`. Shared Log Analytics, Key Vault, container registry and the runner identity, landing in the spoke named by `spokeName`. |
-| `containerAppsEnvironment` | No | `containerAppsEnvironmentType`. Runner environment in the runners subnet of the hub named by `hubName`. |
+| `containerAppsEnvironment` | No | `containerAppsEnvironmentType`. Runner environment in the subnet named by `subnetName` of the spoke named by `spokeName`. |
 | `githubApp` | No | `githubAppType`. The App the runners authenticate as. Required when `githubRunners` is non-empty. |
 | `githubRunners` | No | `githubRunnerType[]`. One entry per repository. Onboarding is an entry here. |
 | `tags` | No | Applied to the resource group and every zone. Hubs may override with their own `tags`. |
 | `enableTelemetry` | No | AVM telemetry, default `true`. |
+
+## Subscription targeting
+
+Every resource this template deploys lands in a subscription chosen by **data**, never by the
+ambient CLI context.
+
+`defaultSubscriptionId` is a required parameter. Each hub, spoke and platform component may
+override it with its own `subscriptionId`; anything that does not names `defaultSubscriptionId`
+instead. Cross-subscription placement works because every module declares an explicit
+`scope: subscription(...)` or `scope: resourceGroup(<subscriptionId>, <name>)`.
+
+This is deliberate, and it is worth understanding why before "simplifying" it back to
+`subscription().subscriptionId`:
+
+> `az deployment sub create` targets whichever subscription the CLI has active. `az account set`
+> does not persist across shells or CI steps. A subscription-scoped template that infers its
+> own subscription will therefore deploy a **complete duplicate estate into the wrong
+> subscription and report success** — no error, no warning. That happened in this repository:
+> a full hub, firewall and a 125-zone DNS catalog were built in the wrong subscription and had
+> to be deleted by hand.
+
+Two rules follow, and both matter:
+
+1. **No module may rely on the deployment's own subscription.** A module with no `scope`, or one
+   using the single-argument `resourceGroup(name)`, silently inherits the ambient subscription.
+   The DNS resource group and zone catalog were the last two doing this. If you add a module,
+   give it an explicit scope.
+2. **Always pass `--subscription` as well**, matching `defaultSubscriptionId`. The parameter
+   controls where *resources* are created; `--subscription` controls where the *deployment
+   record* is written. `deploy.yml` passes `--subscription ${{ vars.AZURE_SUBSCRIPTION_ID }}` on
+   both `what-if` and `create`.
+
+To verify the guard holds, point the CLI somewhere harmless and confirm the plan is unchanged:
+
+```pwsh
+az account set -s <some-other-subscription>
+az deployment sub what-if --location centralus --template-file infra/main.bicep `
+  --parameters infra/main.bicepparam
+```
+
+Every resource ID in the output must name `defaultSubscriptionId` (or a `subscriptionId`
+explicitly declared on a hub or spoke). Any `Create` against the active subscription is the bug
+resurfacing.
 
 ## Hubs
 
