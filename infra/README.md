@@ -162,8 +162,9 @@ hosts the self-hosted runners — see [Self-hosted runners](#self-hosted-github-
 | `snet-runners` | `10.2.0.0/26` | Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
 | *(free)* | `10.2.0.64` – `10.2.15.255` | |
 
-Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges
-must not overlap; that invariant is documented, not enforced in code.
+Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges must
+not overlap — an invariant enforced on every pull request by
+[the address plan check](#address-plan-check), not merely documented here.
 
 ### Orphans after a removal
 
@@ -961,6 +962,59 @@ its own:
   (`NestedDeploymentShortCircuited`), and this template exceeds that. The Container Apps
   environment and the runner jobs are routinely skipped, so **`what-if` cannot see the part of
   the template most likely to break.**
+
+A third class — an overlapping or malformed address plan — used to survive as well. That one is
+now caught, by [the address plan check](#address-plan-check).
+
+### Address plan check
+
+`az bicep build` cannot catch an overlapping address plan. To the compiler a prefix is just a
+string — `'10.1.0.0/20'` and `'10.1.5.0/24'` are two unrelated strings, not two ranges that
+collide. Azure only objects later, and not always usefully: a spoke overlapping the hub fails at
+peering time, while a subnet outside its own VNet fails during the VNet write, after other
+resources have already been created.
+
+[`check_address_plan.py`](../.github/scripts/check_address_plan.py) closes that gap. It runs on
+every pull request, before Azure login, because it needs no credentials and no cloud round trip —
+a bad plan fails in seconds rather than after a multi-minute `what-if`. It enforces:
+
+| Rule | Why |
+|---|---|
+| No two virtual networks overlap | Azure refuses to peer overlapping VNets. |
+| Every subnet is inside its own VNet's address space | Rejected at VNet write time. |
+| No two subnets overlap within one VNet | Same. |
+| Every prefix is a valid CIDR with no host bits set | `10.1.0.1/24` is a preflight failure. |
+| Network names are unique | A duplicate name silently merges two entries. |
+
+It also refuses to run against a parameter file containing no virtual networks at all, exiting
+`2` rather than `0`. If the parameter shape ever drifts — `hubs`/`spokes` renamed,
+`addressPrefixes` restructured — the check would otherwise keep reporting success while
+enforcing nothing. A check that inspects nothing must not look like a check that passed.
+
+It validates the **built** parameters, not the source text, so values that arrive through
+variables, expressions or the `using` directive are all covered. It reports every violation at
+once rather than stopping at the first, so one run gives the whole picture.
+
+Run it locally the same way CI does:
+
+```powershell
+az bicep build-params --file infra/main.bicepparam --outfile "$env:TEMP\params.json"
+python .github\scripts\check_address_plan.py "$env:TEMP\params.json"
+```
+
+The checker has its own tests, which CI runs first:
+
+```powershell
+python .github\scripts\test_check_address_plan.py
+```
+
+Those tests matter more than they look. A validator that cannot fail is worse than no validator,
+because it buys false confidence — so each test asserts a specific violation is **rejected**, and
+a few assert that legitimate plans (adjacent-but-not-overlapping ranges, the same subnet prefix
+reused in two different VNets) are **accepted**. Both directions have to hold.
+
+The address plan tables above are still hand-maintained prose. The check enforces that they do
+not contradict the parameters; it does not keep them in sync. Update them when you add a range.
 
 ### Subscription targeting
 

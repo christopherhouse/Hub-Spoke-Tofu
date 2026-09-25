@@ -7,12 +7,14 @@ on:
       - 'infra/**'
       - 'bicepconfig.json'
       - '.github/workflows/deploy.yml'
+      - '.github/scripts/**'
   push:
     branches: [main]
     paths:
       - 'infra/**'
       - 'bicepconfig.json'
       - '.github/workflows/deploy.yml'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 # Entra workload identity federation. id-token is required to request the OIDC token;
@@ -39,12 +41,20 @@ jobs:
       - name: Build Bicep
         run: |
           az bicep build --file infra/main.bicep --stdout > /dev/null
-          az bicep build-params --file infra/main.bicepparam --stdout > /dev/null
+          az bicep build-params --file infra/main.bicepparam --outfile "$RUNNER_TEMP/params.json"
           # Built but never deployed here. The bootstrap root creates the identity this
           # workflow authenticates as, so a human deploys it once, by hand. Building it keeps
           # it from rotting.
           az bicep build --file infra/bootstrap/main.bicep --stdout > /dev/null
           az bicep build-params --file infra/bootstrap/main.bicepparam --stdout > /dev/null
+
+      # Runs before Azure login: it needs no credentials and no cloud round trip, so an
+      # overlapping address plan fails in seconds rather than after a multi-minute what-if.
+      # Bicep cannot catch this itself - CIDRs are just strings to the compiler.
+      - name: Check address plan
+        run: |
+          python3 .github/scripts/test_check_address_plan.py
+          python3 .github/scripts/check_address_plan.py "$RUNNER_TEMP/params.json"
 
       - name: Azure login
         uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3

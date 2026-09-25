@@ -36,3 +36,7 @@ Thumbs.db
 # Local test and coverage output
 coverage/
 test-results/
+
+# Python bytecode from the address plan check and its tests
+__pycache__/
+*.py[cod]
