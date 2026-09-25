@@ -951,3 +951,39 @@ Two quirks in `avm/res/compute/virtual-machine` `0.22.3` are worked around in
 az bicep build --file infra/main.bicep
 az bicep build-params --file infra/main.bicepparam
 ```
+
+Both are compile-time checks. Two classes of defect survive them, so neither is sufficient on
+its own:
+
+- **Preflight rejections.** `SecurityRuleDescriptionTooLong`, `FirewallPolicyHigherTierOnly
+  Properties` and AVM parameter type mismatches all build cleanly and fail at deploy time.
+- **`what-if` short-circuits nested deployments past a batch of ten**
+  (`NestedDeploymentShortCircuited`), and this template exceeds that. The Container Apps
+  environment and the runner jobs are routinely skipped, so **`what-if` cannot see the part of
+  the template most likely to break.**
+
+### Subscription targeting
+
+Point the CLI at a different subscription and confirm the plan is unchanged — see
+[Subscription targeting](#subscription-targeting). Any `Create` against the active subscription
+means a module has lost its explicit scope.
+
+### Runner smoke test
+
+Nothing in the build validates that traffic actually reaches anything. The runner platform is
+verified by
+[`runner-smoke-test.yml`](https://github.com/christopherhouse/Secure-Integration-Environment/blob/main/.github/workflows/runner-smoke-test.yml)
+in the onboarded repository, which asserts rather than prints:
+
+| Assertion | What it proves |
+|---|---|
+| Egress IP equals the hub firewall's public IP | The spoke UDR, cross-region peering, the firewall and its allow-list all work. Only traffic routed through the firewall can leave with that address. |
+| ACR and Key Vault FQDNs resolve to `10.1.16.x` | Private DNS zone links and the hub peering resolve the Central US private endpoints from West US 3. |
+| `actions/checkout`, `az`, `gh`, `node`, `bicep` run | The image is usable for real work. |
+
+The container's own IP is **not** asserted. Container Apps places containers on an internal pod
+overlay (`100.100.0.0/16`), not on the runner subnet — the subnet backs the environment's nodes.
+An assertion on `10.2.0.x` fails against healthy infrastructure.
+
+Run it by pushing to its branch, or with `workflow_dispatch`. A cold start is roughly a minute:
+KEDA polls for the queued job, then the node pulls the image before the runner registers.
