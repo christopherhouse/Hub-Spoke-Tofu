@@ -71,7 +71,7 @@ type subnetRouteType = {
   @maxLength(80)
   name: string
 
-  @description('Required. Destination prefix the route applies to, in CIDR notation. `0.0.0.0/0` sends all otherwise-unmatched traffic to the next hop.')
+  @description('Required. Destination the route applies to: either a prefix in CIDR notation, or a service tag such as `ApiManagement`. `0.0.0.0/0` sends all otherwise-unmatched traffic to the next hop. A service tag route lets Azure maintain the underlying prefixes, which is the only practical way to carve an exception out of a forced-tunnelling default route.')
   @minLength(7)
   addressPrefix: string
 

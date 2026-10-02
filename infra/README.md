@@ -172,7 +172,7 @@ so the next Central US spoke starts at `10.1.48.0/20`.
 |---|---|---|
 | `snet-foundry-agents` | `10.1.32.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
 | `snet-privateendpoints` | `10.1.34.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
-| `snet-apim` | `10.1.34.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Carries a mandatory NSG rule set and four service endpoints. |
+| `snet-apim` | `10.1.34.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Mandatory NSG rule set, four service endpoints, and a route table that force-tunnels everything except the `ApiManagement` service tag. |
 | *(free)* | `10.1.34.48/28` | |
 | *(free)* | `10.1.34.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
 | *(free)* | `10.1.34.128` – `10.1.35.255` | |
@@ -332,7 +332,8 @@ Neither subnet accepts routes from the parameter file. The guard is structural i
 Every egress path now depends on one policy, including the jump box's.
 
 The policy in `main.bicepparam` is deliberately permissive: **HTTP and HTTPS to any
-destination**, from the hub and the runners spoke. This is a lab trade-off. A curated FQDN list
+destination**, from the hub, the runners spoke, and the force-tunnelled API Management subnet
+in the Foundry spoke. This is a lab trade-off. A curated FQDN list
 — the documented Container Apps requirements
 ([use Azure Firewall with Container Apps](https://learn.microsoft.com/azure/container-apps/use-azure-firewall)),
 GitHub, the platform registry and vault, Windows Update — is tighter, but a missing entry shows
@@ -348,7 +349,12 @@ Vault — see [Only private repositories](#only-private-repositories).
 
 The service-tag network rules are kept alongside it. An application rule only matches traffic
 the firewall can attribute to an FQDN, from SNI or the Host header, so Container Apps platform
-traffic that is not plain HTTP would not match the permissive rule.
+traffic that is not plain HTTP would not match the permissive rule. `allow-apim-dependencies`
+exists for the same reason: Azure Monitor ingestion on port 1886 is not HTTP the firewall can
+attribute to an FQDN, and Entra ID traffic is stated as a service tag rather than inferred.
+API Management's SQL, Storage, Event Hubs and Key Vault dependencies are deliberately absent
+from both rule sets — `snet-apim` reaches those over service endpoints, which bypass its
+default route and never arrive at the firewall at all.
 
 If a runner never registers or the jump box loses internet access, **check the firewall logs
 first** — they go to `log-platform-cus`. A bad rule set costs a fix-up deploy, not a lock-out:
@@ -375,6 +381,27 @@ routes: [
 ```
 
 `HubFirewall` is resolved to `VirtualAppliance` plus the firewall's private IP by the module.
+
+`addressPrefix` also accepts a **service tag** rather than a CIDR, which is how an exception is
+carved out of a forced-tunnelling default route without hard-coding Microsoft's addresses:
+
+```bicep
+routes: [
+  {
+    name: 'apim-control-plane-to-internet'
+    addressPrefix: 'ApiManagement'
+    nextHopType: 'Internet'
+  }
+  {
+    name: 'default-to-firewall'
+    addressPrefix: '0.0.0.0/0'
+    nextHopType: 'HubFirewall'
+  }
+]
+```
+
+The more specific route wins, so the control plane traffic goes straight out and everything
+else is tunnelled. Azure maintains the prefixes behind the tag.
 
 Hub and spoke resolve that address differently, and the difference is deliberate:
 
@@ -609,13 +636,37 @@ already settled.
   its own; those are explicit. The AI, Search, Storage and Cosmos zones are already in the
   catalog.
 
-- **No route table.** Unlike `spoke-runners-wu3`, this spoke egresses directly rather than
-  through the hub firewall. If the lab ever needs a single auditable egress address, note two
-  things: Foundry injection inherits the Container Apps rule that only a workload profile
-  environment honours a user-defined route, and force-tunnelling `snet-apim` additionally
-  requires a UDR sending the `ApiManagement` service tag to next hop `Internet`. Without that
-  return path the control plane's responses do not map back symmetrically and the management
-  endpoint is lost — the same degradation the port 3443 rule exists to prevent.
+- **`snet-apim` is force-tunnelled, with one exception.** Its route table sends `0.0.0.0/0` to
+  the hub firewall, so API Management's egress leaves from the same single auditable address as
+  the rest of the estate. The exception is a route sending the **`ApiManagement` service tag**
+  straight to `Internet`, and it is not optional.
+
+  Control plane traffic arrives from the internet on port 3443, from the addresses that tag
+  covers. If the default route sends the response back through the firewall, it is SNATed to
+  the firewall's address and no longer maps symmetrically to the inbound flow — the control
+  plane never sees the reply and the management endpoint is lost. That is the same degradation
+  the port 3443 NSG rule prevents, reached from the other direction, and it is the most common
+  way a force-tunnelled API Management instance breaks.
+
+  Routing it around the firewall is not a meaningful hole: return traffic only, one port, to a
+  published Microsoft-managed address set that the NSG already restricts inbound to. A service
+  tag is used rather than a prefix list so Azure maintains the addresses.
+
+  The four service endpoints matter here too. SQL, Storage, Event Hubs and Key Vault traffic
+  bypasses the default route entirely and takes the Azure backbone, so none of it needs a
+  firewall rule. Without the endpoints, forced tunnelling would mean allow-listing the full
+  published IP range of each dependent service and keeping it current as Azure changes.
+
+  The firewall side is in `main.bicepparam`: `10.1.34.32/28` is added to the permissive HTTP
+  and HTTPS application rule, and an `allow-apim-dependencies` network rule covers Azure
+  Monitor ingestion on port **1886** and Entra ID on 443 — neither of which an application rule
+  would match, because the firewall cannot attribute them to an FQDN.
+
+- **`snet-foundry-agents` is not force-tunnelled.** Only a Container Apps *workload profile*
+  environment honours a user-defined route, and the Foundry-managed environment behind agent
+  injection is not one this repository controls. A default route on that subnet is as likely to
+  break the agents as to route them, so it is left on the system routes. Revisit if Foundry
+  documents forced-tunnelling support.
 
 ### Peering
 

@@ -98,6 +98,7 @@ param hubs = [
           name: 'allow-web-outbound'
           sourceAddresses: [
             '10.0.0.0/19'
+            '10.1.34.32/28'
             '10.2.0.0/20'
           ]
           targetFqdns: [
@@ -133,6 +134,31 @@ param hubs = [
           ]
           destinationPorts: [
             '443'
+          ]
+        }
+        // The force-tunnelled API Management subnet. The application rule above already
+        // covers its plain HTTP and HTTPS egress, but two things it depends on would not
+        // match an application rule: Azure Monitor's ingestion port 1886, which is not HTTP
+        // the firewall can attribute to an FQDN, and Entra ID token and Microsoft Graph
+        // traffic, which an instance uses for identity-backed features. Both are stated as
+        // network rules so they match on service tag rather than on an FQDN the firewall has
+        // to infer.
+        //
+        // The remaining dependencies - SQL, Storage, Event Hubs and Key Vault - are absent on
+        // purpose: `snet-apim` reaches those over service endpoints, which bypass the default
+        // route and never arrive here.
+        {
+          name: 'allow-apim-dependencies'
+          sourceAddresses: [
+            '10.1.34.32/28'
+          ]
+          destinationAddresses: [
+            'AzureMonitor'
+            'AzureActiveDirectory'
+          ]
+          destinationPorts: [
+            '443'
+            '1886'
           ]
         }
       ]
@@ -337,6 +363,39 @@ param spokes = [
         ]
         // Hosts no virtual machines.
         allowBastionAccess: false
+        // Forced tunnelling. Everything leaves through the hub firewall so the lab has one
+        // auditable egress address, with one deliberate exception.
+        //
+        // The ApiManagement service tag route is not optional, and omitting it is the single
+        // most common way a force-tunnelled API Management instance breaks. Control plane
+        // traffic arrives from the internet on port 3443 from the set of addresses that tag
+        // covers. If the default route sends the response back through the firewall, it is
+        // SNATed to the firewall's address and no longer maps symmetrically to the inbound
+        // flow, so the control plane never sees the reply and the management endpoint is
+        // lost - the same degradation the port 3443 NSG rule exists to prevent, reached from
+        // the other direction. Sending that tag straight to the internet restores the
+        // symmetric return path.
+        //
+        // Routing it around the firewall is not a meaningful hole: it is return traffic only,
+        // on one port, to a published Microsoft-managed set of addresses that the NSG already
+        // restricts inbound to.
+        //
+        // The dependencies reached over the service endpoints above - SQL, Storage, Event
+        // Hubs and Key Vault - need no route of their own. Service endpoint traffic takes the
+        // Azure backbone and ignores the 0.0.0.0/0 route entirely, which is most of why those
+        // endpoints are enabled.
+        routes: [
+          {
+            name: 'apim-control-plane-to-internet'
+            addressPrefix: 'ApiManagement'
+            nextHopType: 'Internet'
+          }
+          {
+            name: 'default-to-firewall'
+            addressPrefix: '0.0.0.0/0'
+            nextHopType: 'HubFirewall'
+          }
+        ]
       }
     ]
   }
