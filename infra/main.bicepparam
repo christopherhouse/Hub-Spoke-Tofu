@@ -1,8 +1,11 @@
 using './main.bicep'
 
 // The runner NSG rule set lives in its own file rather than inline here because it is a
-// reviewed security artifact, the same way the Private DNS zone catalog is.
+// reviewed security artifact, the same way the Private DNS zone catalog is. The API
+// Management rule set is there for the same reason, and for an additional one: without it a
+// classic injected instance silently degrades.
 import { runnerSecurityRules } from './runner-nsg-rules.bicep'
+import { apimSecurityRules } from './apim-nsg-rules.bicep'
 
 param dnsResourceGroupName = 'RG-CONNECTIVITY-DNS-CUS'
 
@@ -96,6 +99,7 @@ param hubs = [
           sourceAddresses: [
             '10.0.0.0/19'
             '10.2.0.0/20'
+            '10.2.18.32/28'
           ]
           targetFqdns: [
             '*'
@@ -130,6 +134,31 @@ param hubs = [
           ]
           destinationPorts: [
             '443'
+          ]
+        }
+        // The force-tunnelled API Management subnet. The application rule above already
+        // covers its plain HTTP and HTTPS egress, but two things it depends on would not
+        // match an application rule: Azure Monitor's ingestion port 1886, which is not HTTP
+        // the firewall can attribute to an FQDN, and Entra ID token and Microsoft Graph
+        // traffic, which an instance uses for identity-backed features. Both are stated as
+        // network rules so they match on service tag rather than on an FQDN the firewall has
+        // to infer.
+        //
+        // The remaining dependencies - SQL, Storage, Event Hubs and Key Vault - are absent on
+        // purpose: `snet-apim` reaches those over service endpoints, which bypass the default
+        // route and never arrive here.
+        {
+          name: 'allow-apim-dependencies'
+          sourceAddresses: [
+            '10.2.18.32/28'
+          ]
+          destinationAddresses: [
+            'AzureMonitor'
+            'AzureActiveDirectory'
+          ]
+          destinationPorts: [
+            '443'
+            '1886'
           ]
         }
       ]
@@ -254,6 +283,127 @@ param spokes = [
       }
     ]
   }
+  // The privately networked Azure AI Foundry lab: a Foundry resource with network injection
+  // for the Agent Service, its dependency private endpoints, and API Management in front of
+  // the model endpoints.
+  //
+  // Spoke 4 takes the next West US 3 /20 slot, 10.2.16.0/20, but only declares a /22 of it.
+  // The slot is reserved so the next West US 3 spoke starts at 10.2.32.0/20 and the lab can
+  // grow into 10.2.20.0 - 10.2.31.255 without renumbering.
+  //
+  // Spoke 4 is 10.2.16.0/22 (10.2.16.0 - 10.2.19.255):
+  //   10.2.16.0/23    snet-foundry-agents
+  //   10.2.18.0/27    snet-privateendpoints
+  //   10.2.18.32/28   snet-apim
+  //   10.2.18.48/28   free
+  //   10.2.18.64/26   free, earmarked for an Application Gateway if public ingress is added
+  //   10.2.18.128 - 10.2.19.255   free
+  {
+    name: 'spoke-foundry-wu3'
+    hubName: 'hub-cus'
+    // West US 3, while the hub stays in Central US. The same arrangement the runners spoke
+    // uses: it peers cross-region back to hub-cus and force-tunnels through the hub firewall
+    // from there. Note this pins the region for the workload too - an injected API Management
+    // instance must be in the same region and subscription as its virtual network, and the
+    // Foundry account must be in the region of the subnet it injects into.
+    location: 'westus3'
+    resourceGroupName: 'RG-WORKLOAD-FOUNDRY-WU3'
+    addressPrefixes: [
+      '10.2.16.0/22'
+    ]
+    subnets: [
+      {
+        // Foundry Agent Service network injection. The agents run on managed compute that
+        // Azure places in this subnet, so it is dedicated to the Foundry account and hosts
+        // nothing else.
+        name: 'snet-foundry-agents'
+        addressPrefix: '10.2.16.0/23'
+        // Required by Foundry network injection, which runs the agents on the Container Apps
+        // platform. Documented minimum is /27; a /23 leaves room for the agent fleet to
+        // scale, and like a Container Apps environment subnet it cannot be resized once the
+        // injected account exists.
+        delegation: 'Microsoft.App/environments'
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+      }
+      {
+        // Private endpoints for the Foundry account and its bring-your-own dependencies:
+        // Azure AI Search, Storage and Cosmos DB. Those three are not auto-created by a
+        // Foundry deployment, so they land here explicitly.
+        name: 'snet-privateendpoints'
+        addressPrefix: '10.2.18.0/27'
+        allowBastionAccess: false
+        privateEndpointNetworkPolicies: 'Disabled'
+      }
+      {
+        // API Management, classic Premium tier, injected in internal mode. Dedicated by
+        // convention rather than by Azure rule: the classic tier permits other resources in
+        // its subnet, but sharing one with a service that scales independently is a good way
+        // to run out of addresses mid scale-out.
+        //
+        // /28: the classic minimum is /29, which leaves no room to scale at all. A /28 gives
+        // 16 addresses - 5 reserved by Azure, 2 for the instance, 1 for the internal load
+        // balancer - which is 4 scale-out units, 5 total. Consider /26 or /25 if this ever
+        // approaches the 31-unit Premium ceiling.
+        name: 'snet-apim'
+        addressPrefix: '10.2.18.32/28'
+        // Deliberately no `delegation`. Classic injection requires the subnet be delegated to
+        // nothing at all; delegation to Microsoft.Web/serverFarms is a v2-tier requirement and
+        // would make the classic deployment fail.
+        //
+        // Not optional, unlike every other NSG in this file. The load balancer API Management
+        // uses internally rejects all inbound traffic by default, so without the port 3443
+        // rule in this set the instance deploys green and then degrades hours later.
+        securityRules: apimSecurityRules()
+        // Dependency traffic takes the Azure backbone from this subnet rather than the
+        // general egress path. Microsoft strongly recommends these for a classic injected
+        // instance, and they are what keeps the dependencies working if this subnet is ever
+        // force-tunnelled through the hub firewall - service endpoint traffic bypasses a
+        // 0.0.0.0/0 route, so SQL and Storage keep working while everything else is inspected.
+        serviceEndpoints: [
+          'Microsoft.Sql'
+          'Microsoft.Storage'
+          'Microsoft.EventHub'
+          'Microsoft.KeyVault'
+        ]
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+        // Forced tunnelling. Everything leaves through the hub firewall so the lab has one
+        // auditable egress address, with one deliberate exception.
+        //
+        // The ApiManagement service tag route is not optional, and omitting it is the single
+        // most common way a force-tunnelled API Management instance breaks. Control plane
+        // traffic arrives from the internet on port 3443 from the set of addresses that tag
+        // covers. If the default route sends the response back through the firewall, it is
+        // SNATed to the firewall's address and no longer maps symmetrically to the inbound
+        // flow, so the control plane never sees the reply and the management endpoint is
+        // lost - the same degradation the port 3443 NSG rule exists to prevent, reached from
+        // the other direction. Sending that tag straight to the internet restores the
+        // symmetric return path.
+        //
+        // Routing it around the firewall is not a meaningful hole: it is return traffic only,
+        // on one port, to a published Microsoft-managed set of addresses that the NSG already
+        // restricts inbound to.
+        //
+        // The dependencies reached over the service endpoints above - SQL, Storage, Event
+        // Hubs and Key Vault - need no route of their own. Service endpoint traffic takes the
+        // Azure backbone and ignores the 0.0.0.0/0 route entirely, which is most of why those
+        // endpoints are enabled.
+        routes: [
+          {
+            name: 'apim-control-plane-to-internet'
+            addressPrefix: 'ApiManagement'
+            nextHopType: 'Internet'
+          }
+          {
+            name: 'default-to-firewall'
+            addressPrefix: '0.0.0.0/0'
+            nextHopType: 'HubFirewall'
+          }
+        ]
+      }
+    ]
+  }
 ]
 
 // Shared platform services. `spokeName` supplies the subscription, resource group and region,
@@ -341,7 +491,9 @@ param githubRunners = [
 param virtualNetworkLinks = []
 
 // Container Apps zones for regions other than `location` must be listed here explicitly,
-// because the module resolves {regionName} from `location` only.
+// because the module resolves {regionName} from `location` only. West US 3 serves two
+// spokes now: the runners' Container Apps environment, and the Foundry agent injection
+// subnet in spoke-foundry-wu3, which runs on the same platform.
 param additionalPrivateLinkPrivateDnsZonesToInclude = [
   'privatelink.westus3.azurecontainerapps.io'
 ]

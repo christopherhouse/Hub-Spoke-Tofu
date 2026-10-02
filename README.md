@@ -50,6 +50,7 @@ infra/
   types.bicep        shared user-defined types, e.g. hubType (@export)
   zones.bicep        curated Private Link DNS zone catalog (@export)
   runner-nsg-rules.bicep   NSG rules for the Container Apps runners subnet (@export)
+  apim-nsg-rules.bicep     NSG rules required by a classic injected API Management (@export)
   bootstrap/
     main.bicep       deployment identity and its RBAC, deployed by hand, never by CI
     main.bicepparam

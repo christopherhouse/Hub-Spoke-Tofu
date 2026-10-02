@@ -70,4 +70,21 @@ var curatedPrivateLinkPrivateDnsZones = [
 
   // Service Bus. Also covers Event Hubs and Relay.
   'privatelink.servicebus.windows.net'
+
+  // Azure Monitor is deliberately absent. Application Insights has no per-component private
+  // endpoint; reaching it privately requires an Azure Monitor Private Link Scope, which this
+  // repository has decided against. Adding privatelink.monitor.azure.com and its three
+  // companions without an AMPLS would be worse than omitting them: this catalog is linked to
+  // every hub and spoke virtual network, so the zones would override Azure Monitor name
+  // resolution estate-wide with no private endpoint records behind them. A virtual network
+  // can also connect to only one AMPLS, which makes this one estate-wide decision rather
+  // than a per-spoke one. See infra/README.md.
+
+  // API Management is deliberately absent. privatelink.azure-api.net exists, but it serves a
+  // private *endpoint*, and `spoke-foundry-wu3` injects a classic Premium instance into
+  // `snet-apim` instead - the two are different connectivity models and an injected instance
+  // has no private endpoint. Internal-mode injection needs a plain `azure-api.net` zone
+  // holding A records for the instance's internal load balancer address, which is assigned
+  // dynamically and unknown until the instance exists. That zone belongs with the API
+  // Management deployment, not in this catalog. See infra/README.md.
 ]

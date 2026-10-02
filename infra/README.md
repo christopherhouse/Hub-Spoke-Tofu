@@ -9,6 +9,7 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `types.bicep` | Shared user-defined types (`hubType` and friends), surfaced with `@export()`. |
 | `zones.bicep` | Curated Private Link DNS zone catalog, surfaced with `@export()`. |
 | `runner-nsg-rules.bicep` | Reviewed NSG rule set for the Container Apps runners subnet, surfaced with `@export()`. |
+| `apim-nsg-rules.bicep` | Reviewed NSG rule set **required** by a classic Developer/Premium API Management instance injected in internal mode, surfaced with `@export()`. |
 | `modules/hub.bicep` | Hub virtual network, subnets, NSGs, route tables, Azure Bastion and the Azure Firewall. Resource-group scope. |
 | `modules/spoke.bicep` | Spoke virtual network, subnets, per-subnet NSGs and route tables, and bidirectional peering to its hub. Resource-group scope. |
 | `modules/firewall.bicep` | Azure Firewall and its policy, including the always-SNAT setting that makes hub transit work. Resource-group scope. |
@@ -161,6 +162,22 @@ hosts the self-hosted runners — see [Self-hosted runners](#self-hosted-github-
 |---|---|---|
 | `snet-runners` | `10.2.0.0/26` | Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
 | *(free)* | `10.2.0.64` – `10.2.15.255` | |
+
+Spoke 4, `spoke-foundry-wu3`, is `10.2.16.0/22` (10.2.16.0 – 10.2.19.255), in **West US 3**. It
+holds the privately networked Azure AI Foundry lab — see
+[Foundry lab spoke](#foundry-lab-spoke). It is the only spoke that does not declare a full
+`/20`: the `10.2.16.0/20` slot is reserved for it, so the next West US 3 spoke starts at
+`10.2.32.0/20`.
+
+| Subnet | Prefix | Notes |
+|---|---|---|
+| `snet-foundry-agents` | `10.2.16.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
+| `snet-privateendpoints` | `10.2.18.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
+| `snet-apim` | `10.2.18.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Mandatory NSG rule set, four service endpoints, and a route table that force-tunnels everything except the `ApiManagement` service tag. |
+| *(free)* | `10.2.18.48/28` | |
+| *(free)* | `10.2.18.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
+| *(free)* | `10.2.18.128` – `10.2.19.255` | |
+| *(reserved)* | `10.2.20.0` – `10.2.31.255` | Rest of the spoke's `/20` slot. |
 
 Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges must
 not overlap — an invariant enforced on every pull request by
@@ -316,7 +333,8 @@ Neither subnet accepts routes from the parameter file. The guard is structural i
 Every egress path now depends on one policy, including the jump box's.
 
 The policy in `main.bicepparam` is deliberately permissive: **HTTP and HTTPS to any
-destination**, from the hub and the runners spoke. This is a lab trade-off. A curated FQDN list
+destination**, from the hub, the runners spoke, and the force-tunnelled API Management subnet
+in the Foundry spoke. This is a lab trade-off. A curated FQDN list
 — the documented Container Apps requirements
 ([use Azure Firewall with Container Apps](https://learn.microsoft.com/azure/container-apps/use-azure-firewall)),
 GitHub, the platform registry and vault, Windows Update — is tighter, but a missing entry shows
@@ -332,7 +350,12 @@ Vault — see [Only private repositories](#only-private-repositories).
 
 The service-tag network rules are kept alongside it. An application rule only matches traffic
 the firewall can attribute to an FQDN, from SNI or the Host header, so Container Apps platform
-traffic that is not plain HTTP would not match the permissive rule.
+traffic that is not plain HTTP would not match the permissive rule. `allow-apim-dependencies`
+exists for the same reason: Azure Monitor ingestion on port 1886 is not HTTP the firewall can
+attribute to an FQDN, and Entra ID traffic is stated as a service tag rather than inferred.
+API Management's SQL, Storage, Event Hubs and Key Vault dependencies are deliberately absent
+from both rule sets — `snet-apim` reaches those over service endpoints, which bypass its
+default route and never arrive at the firewall at all.
 
 If a runner never registers or the jump box loses internet access, **check the firewall logs
 first** — they go to `log-platform-cus`. A bad rule set costs a fix-up deploy, not a lock-out:
@@ -359,6 +382,27 @@ routes: [
 ```
 
 `HubFirewall` is resolved to `VirtualAppliance` plus the firewall's private IP by the module.
+
+`addressPrefix` also accepts a **service tag** rather than a CIDR, which is how an exception is
+carved out of a forced-tunnelling default route without hard-coding Microsoft's addresses:
+
+```bicep
+routes: [
+  {
+    name: 'apim-control-plane-to-internet'
+    addressPrefix: 'ApiManagement'
+    nextHopType: 'Internet'
+  }
+  {
+    name: 'default-to-firewall'
+    addressPrefix: '0.0.0.0/0'
+    nextHopType: 'HubFirewall'
+  }
+]
+```
+
+The more specific route wins, so the control plane traffic goes straight out and everything
+else is tunnelled. Azure maintains the prefixes behind the tag.
 
 Hub and spoke resolve that address differently, and the difference is deliberate:
 
@@ -528,6 +572,110 @@ Bicep's `assert` is still experimental, so the invariant is documented rather th
 Spoke subnets are a generic list, not named roles like the hub's. A spoke is a workload
 landing zone, so its subnets are not knowable in advance.
 
+### Foundry lab spoke
+
+`spoke-foundry-wu3` is the landing zone for a privately networked Azure AI Foundry lab. The
+spoke itself is network only — no Foundry account, API Management instance or private endpoint
+is deployed by this repository yet. What it establishes is the address space and the three
+subnets those resources require, with the constraints that cannot be changed afterwards
+already settled.
+
+It is in **West US 3**, peered cross-region back to `hub-cus` in Central US — the same
+arrangement `spoke-runners-wu3` uses, and the reason `allowForwardedTraffic` and the hub
+firewall transit path already work for it. The region is not just a label: an injected API
+Management instance must be in the **same region and subscription as its virtual network**,
+and the Foundry account must be in the region of the subnet it injects into, so both land in
+West US 3 too.
+
+- **`snet-foundry-agents` is delegated to `Microsoft.App/environments`.** Foundry Agent Service
+  network injection runs the agents on the Container Apps platform, and Azure requires that
+  delegation and a /27 or larger subnet before it will accept the injection. The subnet is
+  dedicated to the injected Foundry account.
+- **It is a /23, well past the documented minimum, on purpose.** The same rule that applies to
+  a Container Apps environment applies here: the subnet cannot be resized once something is
+  injected into it, so growing later means rebuilding the account.
+- **`snet-apim` is a /28, undelegated.** The instance is **classic Premium**, injected in
+  internal mode, not one of the v2 tiers. Classic injection requires the subnet be delegated
+  to *nothing*; the `Microsoft.Web/serverFarms` delegation is a v2-tier requirement and would
+  make a classic deployment fail. The classic minimum is `/29`, which leaves no room to scale
+  at all, so `/28` is the smallest sensible size.
+
+  | Subnet CIDR | Azure reserved | Instance | Internal load balancer | Scale-out units | Total units |
+  |---|---|---|---|---|---|
+  | `/29` | 5 | 2 | 1 | 0 | 1 |
+  | `/28` | 5 | 2 | 1 | 4 | 5 |
+  | `/27` | 5 | 2 | 1 | 12 | 13 |
+
+  Premium scales to 31 units; `/26` or `/25` is the answer if the lab ever approaches that.
+  The subnet cannot be moved across subscriptions once an instance is in it.
+
+- **`snet-apim`'s NSG rule set is not optional.** Every other NSG in this repository starts
+  empty and exists so rules *can* be added. This one must carry rules from the outset: the
+  load balancer API Management uses internally is secure by default and rejects all inbound
+  traffic, so without an explicit allow on port 3443 from the `ApiManagement` service tag the
+  instance **deploys green and then degrades** — the portal reports it unreachable, policy and
+  certificate updates stop applying, and platform patches stop arriving, hours after a
+  successful deployment. The rules live in `infra/apim-nsg-rules.bicep`, imported by
+  `main.bicepparam`, and follow the documented *External & Internal* rows at priorities
+  200–250. The external-only rows — `Internet` inbound on 80 and 443, `AzureTrafficManager`
+  inbound on 443 — are omitted on purpose; adding external mode means adding them.
+
+- **`snet-apim` carries four service endpoints**: `Microsoft.Sql`, `Microsoft.Storage`,
+  `Microsoft.EventHub` and `Microsoft.KeyVault`. Microsoft strongly recommends these for a
+  classic injected instance — dependency traffic takes the Azure backbone rather than the
+  general egress path. They also matter if this subnet is ever force-tunnelled through the hub
+  firewall: service endpoint traffic bypasses a `0.0.0.0/0` route, so those four dependencies
+  keep working while everything else is inspected. Without them, forced tunnelling means
+  allow-listing the full published IP range of each dependent service in the firewall and
+  keeping it current as Azure changes.
+
+- **There is no API Management zone in the catalog.** `privatelink.azure-api.net` serves a
+  private *endpoint*, and an injected instance does not have one — injection and Private Link
+  are different connectivity models. Internal-mode injection instead needs a plain
+  `azure-api.net` private DNS zone holding A records for the instance's internal load balancer
+  address. That address is assigned dynamically and is unknowable until the instance exists —
+  and changing subnet and back can change it — so the zone belongs with the API Management
+  deployment rather than in `infra/zones.bicep`. Set the custom DNS up **before** deploying
+  API Management into the virtual network; changing DNS afterwards requires an *Apply network
+  configuration* operation on the instance.
+
+- **`snet-privateendpoints` carries the Foundry dependencies.** A Foundry deployment does not
+  auto-create private endpoints for Azure AI Search, Storage or Cosmos DB even when it brings
+  its own; those are explicit. The AI, Search, Storage and Cosmos zones are already in the
+  catalog.
+
+- **`snet-apim` is force-tunnelled, with one exception.** Its route table sends `0.0.0.0/0` to
+  the hub firewall, so API Management's egress leaves from the same single auditable address as
+  the rest of the estate. The exception is a route sending the **`ApiManagement` service tag**
+  straight to `Internet`, and it is not optional.
+
+  Control plane traffic arrives from the internet on port 3443, from the addresses that tag
+  covers. If the default route sends the response back through the firewall, it is SNATed to
+  the firewall's address and no longer maps symmetrically to the inbound flow — the control
+  plane never sees the reply and the management endpoint is lost. That is the same degradation
+  the port 3443 NSG rule prevents, reached from the other direction, and it is the most common
+  way a force-tunnelled API Management instance breaks.
+
+  Routing it around the firewall is not a meaningful hole: return traffic only, one port, to a
+  published Microsoft-managed address set that the NSG already restricts inbound to. A service
+  tag is used rather than a prefix list so Azure maintains the addresses.
+
+  The four service endpoints matter here too. SQL, Storage, Event Hubs and Key Vault traffic
+  bypasses the default route entirely and takes the Azure backbone, so none of it needs a
+  firewall rule. Without the endpoints, forced tunnelling would mean allow-listing the full
+  published IP range of each dependent service and keeping it current as Azure changes.
+
+  The firewall side is in `main.bicepparam`: `10.2.18.32/28` is added to the permissive HTTP
+  and HTTPS application rule, and an `allow-apim-dependencies` network rule covers Azure
+  Monitor ingestion on port **1886** and Entra ID on 443 — neither of which an application rule
+  would match, because the firewall cannot attribute them to an FQDN.
+
+- **`snet-foundry-agents` is not force-tunnelled.** Only a Container Apps *workload profile*
+  environment honours a user-defined route, and the Foundry-managed environment behind agent
+  injection is not one this repository controls. A default route on that subnet is as likely to
+  break the agents as to route them, so it is left on the system routes. Revisit if Foundry
+  documents forced-tunnelling support.
+
 ### Peering
 
 The AVM virtual network module creates **both** directions when `remotePeeringEnabled` is set,
@@ -665,6 +813,54 @@ explicitly so the zones deployed are a reviewed decision rather than a module de
 - **Cosmos DB for PostgreSQL** (`privatelink.postgres.cosmos.azure.com`) is deliberately
   excluded. It is a different service from PostgreSQL flexible server.
 - Autoregistration is never enabled on these zones. Private endpoints own the records.
+
+### Coverage for the Foundry lab's bring-your-own dependencies
+
+Foundry Agent Service in its standard setup does not create private endpoints for the
+resources it depends on, even when you supply your own. Those are explicit, and they land in
+`snet-privateendpoints` in `spoke-foundry-wu3`. The catalog already covers every one of them
+except Application Insights, which stays public by decision:
+
+| Dependency | Private endpoint group ID | Zone | In catalog |
+|---|---|---|---|
+| Foundry account | `account` | `privatelink.services.ai.azure.com`, `privatelink.openai.azure.com`, `privatelink.cognitiveservices.azure.com` | yes |
+| Cosmos DB (NoSQL) | `Sql` | `privatelink.documents.azure.com` | yes |
+| Storage | `blob`, and `file`/`queue`/`table` if used | `privatelink.blob.core.windows.net` and friends | yes |
+| AI Search | `searchService` | `privatelink.search.windows.net` | yes |
+| Key Vault | `vault` | `privatelink.vaultcore.azure.net` | yes |
+| Container Registry | `registry` | `privatelink.azurecr.io` | yes |
+| Agent injection subnet | n/a | `privatelink.westus3.azurecontainerapps.io` — already in `additionalPrivateLinkPrivateDnsZonesToInclude` | yes |
+| **Application Insights** | **none exists** | `privatelink.monitor.azure.com`, `privatelink.oms.opinsights.azure.com`, `privatelink.ods.opinsights.azure.com`, `privatelink.agentsvc.azure-automation.net` | **no — public by decision** |
+
+Deploy all three AI endpoint zones' records or only the ones whose data plane the workload
+calls; the zones themselves are already there either way.
+
+#### Application Insights is deliberately not private
+
+Application Insights has **no per-component private endpoint**. The only way to reach it
+privately is an **Azure Monitor Private Link Scope**, and this repository does not deploy one
+— see [Why the workspace is public](#why-the-workspace-is-public). The Foundry lab follows the
+same posture as the rest of the estate: telemetry goes to a public ingestion endpoint that
+still requires Entra authentication.
+
+The four Azure Monitor zones are therefore absent on purpose, and adding them alone would be
+actively harmful. This repository links **one central zone catalog to every hub and spoke
+virtual network**, so those zones would override Azure Monitor name resolution estate-wide
+with no private endpoint records behind them.
+
+Two Azure constraints are why this can never be a quiet per-spoke change if it is ever
+revisited:
+
+- **A virtual network can connect to only one AMPLS.** Microsoft's guidance for hub-and-spoke
+  is a single private link on the hub, not one per spoke.
+- **Networks that share a DNS share the consequences.** `Private Only` access mode blocks
+  traffic to any Azure Monitor resource outside the scope, across every network sharing those
+  zones, regardless of subscription. With one catalog linked everywhere, that is the whole
+  estate — including the runners' diagnostics and `log-platform-cus`.
+
+Revisiting it means one change that deploys an AMPLS in `hub-cus` covering `log-platform-cus`
+and every component, adds the four zones to the catalog, and starts in `Open` access mode. It
+is not a four-line catalog edit and must not be made as one.
 
 ## Shared platform services
 
