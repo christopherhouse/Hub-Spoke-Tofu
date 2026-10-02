@@ -163,20 +163,21 @@ hosts the self-hosted runners — see [Self-hosted runners](#self-hosted-github-
 | `snet-runners` | `10.2.0.0/26` | Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
 | *(free)* | `10.2.0.64` – `10.2.15.255` | |
 
-Spoke 4, `spoke-foundry-cus`, is `10.1.32.0/22` (10.1.32.0 – 10.1.35.255). It holds the
-privately networked Azure AI Foundry lab — see [Foundry lab spoke](#foundry-lab-spoke). It is
-the only spoke that does not declare a full `/20`: the `10.1.32.0/20` slot is reserved for it,
-so the next Central US spoke starts at `10.1.48.0/20`.
+Spoke 4, `spoke-foundry-wu3`, is `10.2.16.0/22` (10.2.16.0 – 10.2.19.255), in **West US 3**. It
+holds the privately networked Azure AI Foundry lab — see
+[Foundry lab spoke](#foundry-lab-spoke). It is the only spoke that does not declare a full
+`/20`: the `10.2.16.0/20` slot is reserved for it, so the next West US 3 spoke starts at
+`10.2.32.0/20`.
 
 | Subnet | Prefix | Notes |
 |---|---|---|
-| `snet-foundry-agents` | `10.1.32.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
-| `snet-privateendpoints` | `10.1.34.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
-| `snet-apim` | `10.1.34.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Mandatory NSG rule set, four service endpoints, and a route table that force-tunnels everything except the `ApiManagement` service tag. |
-| *(free)* | `10.1.34.48/28` | |
-| *(free)* | `10.1.34.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
-| *(free)* | `10.1.34.128` – `10.1.35.255` | |
-| *(reserved)* | `10.1.36.0` – `10.1.47.255` | Rest of the spoke's `/20` slot. |
+| `snet-foundry-agents` | `10.2.16.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
+| `snet-privateendpoints` | `10.2.18.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
+| `snet-apim` | `10.2.18.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Mandatory NSG rule set, four service endpoints, and a route table that force-tunnels everything except the `ApiManagement` service tag. |
+| *(free)* | `10.2.18.48/28` | |
+| *(free)* | `10.2.18.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
+| *(free)* | `10.2.18.128` – `10.2.19.255` | |
+| *(reserved)* | `10.2.20.0` – `10.2.31.255` | Rest of the spoke's `/20` slot. |
 
 Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges must
 not overlap — an invariant enforced on every pull request by
@@ -573,11 +574,18 @@ landing zone, so its subnets are not knowable in advance.
 
 ### Foundry lab spoke
 
-`spoke-foundry-cus` is the landing zone for a privately networked Azure AI Foundry lab. The
+`spoke-foundry-wu3` is the landing zone for a privately networked Azure AI Foundry lab. The
 spoke itself is network only — no Foundry account, API Management instance or private endpoint
 is deployed by this repository yet. What it establishes is the address space and the three
 subnets those resources require, with the constraints that cannot be changed afterwards
 already settled.
+
+It is in **West US 3**, peered cross-region back to `hub-cus` in Central US — the same
+arrangement `spoke-runners-wu3` uses, and the reason `allowForwardedTraffic` and the hub
+firewall transit path already work for it. The region is not just a label: an injected API
+Management instance must be in the **same region and subscription as its virtual network**,
+and the Foundry account must be in the region of the subnet it injects into, so both land in
+West US 3 too.
 
 - **`snet-foundry-agents` is delegated to `Microsoft.App/environments`.** Foundry Agent Service
   network injection runs the agents on the Container Apps platform, and Azure requires that
@@ -657,7 +665,7 @@ already settled.
   firewall rule. Without the endpoints, forced tunnelling would mean allow-listing the full
   published IP range of each dependent service and keeping it current as Azure changes.
 
-  The firewall side is in `main.bicepparam`: `10.1.34.32/28` is added to the permissive HTTP
+  The firewall side is in `main.bicepparam`: `10.2.18.32/28` is added to the permissive HTTP
   and HTTPS application rule, and an `allow-apim-dependencies` network rule covers Azure
   Monitor ingestion on port **1886** and Entra ID on 443 — neither of which an application rule
   would match, because the firewall cannot attribute them to an FQDN.
@@ -810,7 +818,7 @@ explicitly so the zones deployed are a reviewed decision rather than a module de
 
 Foundry Agent Service in its standard setup does not create private endpoints for the
 resources it depends on, even when you supply your own. Those are explicit, and they land in
-`snet-privateendpoints` in `spoke-foundry-cus`. The catalog already covers every one of them
+`snet-privateendpoints` in `spoke-foundry-wu3`. The catalog already covers every one of them
 except Application Insights, which stays public by decision:
 
 | Dependency | Private endpoint group ID | Zone | In catalog |
@@ -821,7 +829,7 @@ except Application Insights, which stays public by decision:
 | AI Search | `searchService` | `privatelink.search.windows.net` | yes |
 | Key Vault | `vault` | `privatelink.vaultcore.azure.net` | yes |
 | Container Registry | `registry` | `privatelink.azurecr.io` | yes |
-| Agent injection subnet | n/a | `privatelink.centralus.azurecontainerapps.io` | yes |
+| Agent injection subnet | n/a | `privatelink.westus3.azurecontainerapps.io` — already in `additionalPrivateLinkPrivateDnsZonesToInclude` | yes |
 | **Application Insights** | **none exists** | `privatelink.monitor.azure.com`, `privatelink.oms.opinsights.azure.com`, `privatelink.ods.opinsights.azure.com`, `privatelink.agentsvc.azure-automation.net` | **no — public by decision** |
 
 Deploy all three AI endpoint zones' records or only the ones whose data plane the workload

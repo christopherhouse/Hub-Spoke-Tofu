@@ -98,8 +98,8 @@ param hubs = [
           name: 'allow-web-outbound'
           sourceAddresses: [
             '10.0.0.0/19'
-            '10.1.34.32/28'
             '10.2.0.0/20'
+            '10.2.18.32/28'
           ]
           targetFqdns: [
             '*'
@@ -150,7 +150,7 @@ param hubs = [
         {
           name: 'allow-apim-dependencies'
           sourceAddresses: [
-            '10.1.34.32/28'
+            '10.2.18.32/28'
           ]
           destinationAddresses: [
             'AzureMonitor'
@@ -287,24 +287,29 @@ param spokes = [
   // for the Agent Service, its dependency private endpoints, and API Management in front of
   // the model endpoints.
   //
-  // Spoke 4 takes the next /20 slot, 10.1.32.0/20, but only declares a /22 of it. The slot is
-  // reserved so the next spoke starts at 10.1.48.0/20 and the lab can grow into 10.1.36.0 -
-  // 10.1.47.255 without renumbering.
+  // Spoke 4 takes the next West US 3 /20 slot, 10.2.16.0/20, but only declares a /22 of it.
+  // The slot is reserved so the next West US 3 spoke starts at 10.2.32.0/20 and the lab can
+  // grow into 10.2.20.0 - 10.2.31.255 without renumbering.
   //
-  // Spoke 4 is 10.1.32.0/22 (10.1.32.0 - 10.1.35.255):
-  //   10.1.32.0/23    snet-foundry-agents
-  //   10.1.34.0/27    snet-privateendpoints
-  //   10.1.34.32/28   snet-apim
-  //   10.1.34.48/28   free
-  //   10.1.34.64/26   free, earmarked for an Application Gateway if public ingress is added
-  //   10.1.34.128 - 10.1.35.255   free
+  // Spoke 4 is 10.2.16.0/22 (10.2.16.0 - 10.2.19.255):
+  //   10.2.16.0/23    snet-foundry-agents
+  //   10.2.18.0/27    snet-privateendpoints
+  //   10.2.18.32/28   snet-apim
+  //   10.2.18.48/28   free
+  //   10.2.18.64/26   free, earmarked for an Application Gateway if public ingress is added
+  //   10.2.18.128 - 10.2.19.255   free
   {
-    name: 'spoke-foundry-cus'
+    name: 'spoke-foundry-wu3'
     hubName: 'hub-cus'
-    location: 'centralus'
-    resourceGroupName: 'RG-WORKLOAD-FOUNDRY-CUS'
+    // West US 3, while the hub stays in Central US. The same arrangement the runners spoke
+    // uses: it peers cross-region back to hub-cus and force-tunnels through the hub firewall
+    // from there. Note this pins the region for the workload too - an injected API Management
+    // instance must be in the same region and subscription as its virtual network, and the
+    // Foundry account must be in the region of the subnet it injects into.
+    location: 'westus3'
+    resourceGroupName: 'RG-WORKLOAD-FOUNDRY-WU3'
     addressPrefixes: [
-      '10.1.32.0/22'
+      '10.2.16.0/22'
     ]
     subnets: [
       {
@@ -312,7 +317,7 @@ param spokes = [
         // Azure places in this subnet, so it is dedicated to the Foundry account and hosts
         // nothing else.
         name: 'snet-foundry-agents'
-        addressPrefix: '10.1.32.0/23'
+        addressPrefix: '10.2.16.0/23'
         // Required by Foundry network injection, which runs the agents on the Container Apps
         // platform. Documented minimum is /27; a /23 leaves room for the agent fleet to
         // scale, and like a Container Apps environment subnet it cannot be resized once the
@@ -326,7 +331,7 @@ param spokes = [
         // Azure AI Search, Storage and Cosmos DB. Those three are not auto-created by a
         // Foundry deployment, so they land here explicitly.
         name: 'snet-privateendpoints'
-        addressPrefix: '10.1.34.0/27'
+        addressPrefix: '10.2.18.0/27'
         allowBastionAccess: false
         privateEndpointNetworkPolicies: 'Disabled'
       }
@@ -341,7 +346,7 @@ param spokes = [
         // balancer - which is 4 scale-out units, 5 total. Consider /26 or /25 if this ever
         // approaches the 31-unit Premium ceiling.
         name: 'snet-apim'
-        addressPrefix: '10.1.34.32/28'
+        addressPrefix: '10.2.18.32/28'
         // Deliberately no `delegation`. Classic injection requires the subnet be delegated to
         // nothing at all; delegation to Microsoft.Web/serverFarms is a v2-tier requirement and
         // would make the classic deployment fail.
@@ -486,7 +491,9 @@ param githubRunners = [
 param virtualNetworkLinks = []
 
 // Container Apps zones for regions other than `location` must be listed here explicitly,
-// because the module resolves {regionName} from `location` only.
+// because the module resolves {regionName} from `location` only. West US 3 serves two
+// spokes now: the runners' Container Apps environment, and the Foundry agent injection
+// subnet in spoke-foundry-wu3, which runs on the same platform.
 param additionalPrivateLinkPrivateDnsZonesToInclude = [
   'privatelink.westus3.azurecontainerapps.io'
 ]

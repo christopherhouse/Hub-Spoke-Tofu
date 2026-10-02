@@ -81,7 +81,7 @@ var curatedPrivateLinkPrivateDnsZones = [
   // than a per-spoke one. See infra/README.md.
 
   // API Management is deliberately absent. privatelink.azure-api.net exists, but it serves a
-  // private *endpoint*, and `spoke-foundry-cus` injects a classic Premium instance into
+  // private *endpoint*, and `spoke-foundry-wu3` injects a classic Premium instance into
   // `snet-apim` instead - the two are different connectivity models and an injected instance
   // has no private endpoint. Internal-mode injection needs a plain `azure-api.net` zone
   // holding A records for the instance's internal load balancer address, which is assigned
