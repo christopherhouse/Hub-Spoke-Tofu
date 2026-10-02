@@ -1,8 +1,11 @@
 using './main.bicep'
 
 // The runner NSG rule set lives in its own file rather than inline here because it is a
-// reviewed security artifact, the same way the Private DNS zone catalog is.
+// reviewed security artifact, the same way the Private DNS zone catalog is. The API
+// Management rule set is there for the same reason, and for an additional one: without it a
+// classic injected instance silently degrades.
 import { runnerSecurityRules } from './runner-nsg-rules.bicep'
+import { apimSecurityRules } from './apim-nsg-rules.bicep'
 
 param dnsResourceGroupName = 'RG-CONNECTIVITY-DNS-CUS'
 
@@ -265,7 +268,8 @@ param spokes = [
   // Spoke 4 is 10.1.32.0/22 (10.1.32.0 - 10.1.35.255):
   //   10.1.32.0/23    snet-foundry-agents
   //   10.1.34.0/27    snet-privateendpoints
-  //   10.1.34.32/27   snet-apim
+  //   10.1.34.32/28   snet-apim
+  //   10.1.34.48/28   free
   //   10.1.34.64/26   free, earmarked for an Application Gateway if public ingress is added
   //   10.1.34.128 - 10.1.35.255   free
   {
@@ -301,21 +305,36 @@ param spokes = [
         privateEndpointNetworkPolicies: 'Disabled'
       }
       {
-        // API Management, dedicated: a virtual network-joined instance cannot share its
-        // subnet with any other resource.
+        // API Management, classic Premium tier, injected in internal mode. Dedicated by
+        // convention rather than by Azure rule: the classic tier permits other resources in
+        // its subnet, but sharing one with a service that scales independently is a good way
+        // to run out of addresses mid scale-out.
         //
-        // /27, not the /28 first considered: /27 is the documented minimum for virtual
-        // network injection and integration alike, and Azure rejects anything smaller at
-        // preflight. /24 is the recommendation for a production instance that scales out;
-        // /27 is sized for a single-unit lab instance.
+        // /28: the classic minimum is /29, which leaves no room to scale at all. A /28 gives
+        // 16 addresses - 5 reserved by Azure, 2 for the instance, 1 for the internal load
+        // balancer - which is 4 scale-out units, 5 total. Consider /26 or /25 if this ever
+        // approaches the 31-unit Premium ceiling.
         name: 'snet-apim'
-        addressPrefix: '10.1.34.32/27'
-        // The v2 tiers - Basic v2, Standard v2 and Premium v2 - require this delegation for
-        // both outbound integration and full injection. The classic Premium tier uses an
-        // undelegated subnet plus a large mandatory NSG rule set instead; it is roughly an
-        // order of magnitude more expensive and is not what this lab is sized for. Switching
-        // tiers later means recreating this subnet.
-        delegation: 'Microsoft.Web/serverFarms'
+        addressPrefix: '10.1.34.32/28'
+        // Deliberately no `delegation`. Classic injection requires the subnet be delegated to
+        // nothing at all; delegation to Microsoft.Web/serverFarms is a v2-tier requirement and
+        // would make the classic deployment fail.
+        //
+        // Not optional, unlike every other NSG in this file. The load balancer API Management
+        // uses internally rejects all inbound traffic by default, so without the port 3443
+        // rule in this set the instance deploys green and then degrades hours later.
+        securityRules: apimSecurityRules()
+        // Dependency traffic takes the Azure backbone from this subnet rather than the
+        // general egress path. Microsoft strongly recommends these for a classic injected
+        // instance, and they are what keeps the dependencies working if this subnet is ever
+        // force-tunnelled through the hub firewall - service endpoint traffic bypasses a
+        // 0.0.0.0/0 route, so SQL and Storage keep working while everything else is inspected.
+        serviceEndpoints: [
+          'Microsoft.Sql'
+          'Microsoft.Storage'
+          'Microsoft.EventHub'
+          'Microsoft.KeyVault'
+        ]
         // Hosts no virtual machines.
         allowBastionAccess: false
       }

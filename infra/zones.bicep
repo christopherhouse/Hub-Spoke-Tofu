@@ -71,9 +71,11 @@ var curatedPrivateLinkPrivateDnsZones = [
   // Service Bus. Also covers Event Hubs and Relay.
   'privatelink.servicebus.windows.net'
 
-  // API Management. One zone covers every endpoint a private endpoint exposes - gateway,
-  // portal, management and SCM - as separate records inside it, so no per-endpoint zone is
-  // needed. The classic Premium tier's internal virtual network mode uses azure-api.net
-  // records in a zone of its own name rather than this privatelink zone.
-  'privatelink.azure-api.net'
+  // API Management is deliberately absent. privatelink.azure-api.net exists, but it serves a
+  // private *endpoint*, and `spoke-foundry-cus` injects a classic Premium instance into
+  // `snet-apim` instead - the two are different connectivity models and an injected instance
+  // has no private endpoint. Internal-mode injection needs a plain `azure-api.net` zone
+  // holding A records for the instance's internal load balancer address, which is assigned
+  // dynamically and unknown until the instance exists. That zone belongs with the API
+  // Management deployment, not in this catalog. See infra/README.md.
 ]

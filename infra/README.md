@@ -9,6 +9,7 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 | `types.bicep` | Shared user-defined types (`hubType` and friends), surfaced with `@export()`. |
 | `zones.bicep` | Curated Private Link DNS zone catalog, surfaced with `@export()`. |
 | `runner-nsg-rules.bicep` | Reviewed NSG rule set for the Container Apps runners subnet, surfaced with `@export()`. |
+| `apim-nsg-rules.bicep` | Reviewed NSG rule set **required** by a classic Developer/Premium API Management instance injected in internal mode, surfaced with `@export()`. |
 | `modules/hub.bicep` | Hub virtual network, subnets, NSGs, route tables, Azure Bastion and the Azure Firewall. Resource-group scope. |
 | `modules/spoke.bicep` | Spoke virtual network, subnets, per-subnet NSGs and route tables, and bidirectional peering to its hub. Resource-group scope. |
 | `modules/firewall.bicep` | Azure Firewall and its policy, including the always-SNAT setting that makes hub transit work. Resource-group scope. |
@@ -171,7 +172,8 @@ so the next Central US spoke starts at `10.1.48.0/20`.
 |---|---|---|
 | `snet-foundry-agents` | `10.1.32.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
 | `snet-privateendpoints` | `10.1.34.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
-| `snet-apim` | `10.1.34.32/27` | Delegated to `Microsoft.Web/serverFarms` for the API Management v2 tiers. Dedicated — APIM cannot share a subnet. |
+| `snet-apim` | `10.1.34.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Carries a mandatory NSG rule set and four service endpoints. |
+| *(free)* | `10.1.34.48/28` | |
 | *(free)* | `10.1.34.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
 | *(free)* | `10.1.34.128` – `10.1.35.255` | |
 | *(reserved)* | `10.1.36.0` – `10.1.47.255` | Rest of the spoke's `/20` slot. |
@@ -557,26 +559,63 @@ already settled.
 - **It is a /23, well past the documented minimum, on purpose.** The same rule that applies to
   a Container Apps environment applies here: the subnet cannot be resized once something is
   injected into it, so growing later means rebuilding the account.
-- **`snet-apim` is a /27, not a /28.** `/27` is the documented minimum for API Management
-  virtual network injection and integration alike, and Azure rejects anything smaller at
-  preflight — not at `az bicep build`. `/24` is the recommendation for an instance expected to
-  scale out; `/27` is sized for a single-unit lab instance. The subnet is dedicated: a
-  virtual network-joined API Management instance cannot share its subnet with anything else.
-- **`snet-apim` is delegated to `Microsoft.Web/serverFarms`**, which the v2 tiers — Basic v2,
-  Standard v2 and Premium v2 — require for both outbound integration and full injection. The
-  classic Premium tier instead wants an undelegated subnet plus a large mandatory NSG rule
-  set, and costs roughly an order of magnitude more. Moving between the two means recreating
-  the subnet, so the tier is effectively chosen here rather than at API Management deployment
-  time.
+- **`snet-apim` is a /28, undelegated.** The instance is **classic Premium**, injected in
+  internal mode, not one of the v2 tiers. Classic injection requires the subnet be delegated
+  to *nothing*; the `Microsoft.Web/serverFarms` delegation is a v2-tier requirement and would
+  make a classic deployment fail. The classic minimum is `/29`, which leaves no room to scale
+  at all, so `/28` is the smallest sensible size.
+
+  | Subnet CIDR | Azure reserved | Instance | Internal load balancer | Scale-out units | Total units |
+  |---|---|---|---|---|---|
+  | `/29` | 5 | 2 | 1 | 0 | 1 |
+  | `/28` | 5 | 2 | 1 | 4 | 5 |
+  | `/27` | 5 | 2 | 1 | 12 | 13 |
+
+  Premium scales to 31 units; `/26` or `/25` is the answer if the lab ever approaches that.
+  The subnet cannot be moved across subscriptions once an instance is in it.
+
+- **`snet-apim`'s NSG rule set is not optional.** Every other NSG in this repository starts
+  empty and exists so rules *can* be added. This one must carry rules from the outset: the
+  load balancer API Management uses internally is secure by default and rejects all inbound
+  traffic, so without an explicit allow on port 3443 from the `ApiManagement` service tag the
+  instance **deploys green and then degrades** — the portal reports it unreachable, policy and
+  certificate updates stop applying, and platform patches stop arriving, hours after a
+  successful deployment. The rules live in `infra/apim-nsg-rules.bicep`, imported by
+  `main.bicepparam`, and follow the documented *External & Internal* rows at priorities
+  200–250. The external-only rows — `Internet` inbound on 80 and 443, `AzureTrafficManager`
+  inbound on 443 — are omitted on purpose; adding external mode means adding them.
+
+- **`snet-apim` carries four service endpoints**: `Microsoft.Sql`, `Microsoft.Storage`,
+  `Microsoft.EventHub` and `Microsoft.KeyVault`. Microsoft strongly recommends these for a
+  classic injected instance — dependency traffic takes the Azure backbone rather than the
+  general egress path. They also matter if this subnet is ever force-tunnelled through the hub
+  firewall: service endpoint traffic bypasses a `0.0.0.0/0` route, so those four dependencies
+  keep working while everything else is inspected. Without them, forced tunnelling means
+  allow-listing the full published IP range of each dependent service in the firewall and
+  keeping it current as Azure changes.
+
+- **There is no API Management zone in the catalog.** `privatelink.azure-api.net` serves a
+  private *endpoint*, and an injected instance does not have one — injection and Private Link
+  are different connectivity models. Internal-mode injection instead needs a plain
+  `azure-api.net` private DNS zone holding A records for the instance's internal load balancer
+  address. That address is assigned dynamically and is unknowable until the instance exists —
+  and changing subnet and back can change it — so the zone belongs with the API Management
+  deployment rather than in `infra/zones.bicep`. Set the custom DNS up **before** deploying
+  API Management into the virtual network; changing DNS afterwards requires an *Apply network
+  configuration* operation on the instance.
+
 - **`snet-privateendpoints` carries the Foundry dependencies.** A Foundry deployment does not
   auto-create private endpoints for Azure AI Search, Storage or Cosmos DB even when it brings
-  its own; those are explicit. `privatelink.azure-api.net` was added to the zone catalog for
-  the API Management private endpoint; the AI, Search, Storage and Cosmos zones were already
-  there.
+  its own; those are explicit. The AI, Search, Storage and Cosmos zones are already in the
+  catalog.
+
 - **No route table.** Unlike `spoke-runners-wu3`, this spoke egresses directly rather than
-  through the hub firewall. Add routes to the subnets if the lab needs a single auditable
-  egress address, keeping in mind that Foundry injection inherits the Container Apps rule that
-  only a workload profile environment honours a user-defined route.
+  through the hub firewall. If the lab ever needs a single auditable egress address, note two
+  things: Foundry injection inherits the Container Apps rule that only a workload profile
+  environment honours a user-defined route, and force-tunnelling `snet-apim` additionally
+  requires a UDR sending the `ApiManagement` service tag to next hop `Internet`. Without that
+  return path the control plane's responses do not map back symmetrically and the management
+  endpoint is lost — the same degradation the port 3443 rule exists to prevent.
 
 ### Peering
 
