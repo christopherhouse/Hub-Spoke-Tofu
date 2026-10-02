@@ -22,6 +22,24 @@ either is a parameter change, not a template change.
 | Self-hosted Azure DevOps agents | Not started |
 | GitHub Actions deploy workflow | Implemented |
 | CI/CD deployment identity (OIDC, no secrets) | Implemented |
+| Address plan validated in CI (overlap, containment, malformed CIDR) | Implemented |
+| IP address management — ranges allocated by hand, not by a pool | [Deliberate gap](infra/README.md#there-is-no-ipam-here-and-that-is-a-decision) |
+| Virtual network flow logs and traffic analytics | Not started |
+| Alert rules and an action group on firewall, Bastion and runner failures | Not started |
+| Budgets and cost alerts | Not started |
+| Policy guardrails (deny public IPs on workloads, enforce tags) | Not started |
+
+Diagnostics are not monitoring. Every supported resource ships logs to `log-platform-cus`
+today, but nothing *reads* them unprompted — there is no alert rule and no action group
+anywhere in the estate, so a firewall dropping traffic or a runner job failing is visible only
+to someone who goes looking. That, flow logs, and a budget are the next things worth building;
+see the gaps above.
+
+Paid DDoS Protection, a DNS private resolver, and a VPN or ExpressRoute gateway are all
+**deliberately absent**, not forgotten. None of them does anything for an Azure-only lab with
+no public workloads and no on-premises network, and the first two are expensive enough to
+notice. The design keeps all three optional and composable, so each is a parameter change plus
+a module when a reason to want one appears.
 
 ## Layout
 

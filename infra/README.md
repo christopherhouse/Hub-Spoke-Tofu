@@ -166,6 +166,51 @@ Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and sp
 not overlap — an invariant enforced on every pull request by
 [the address plan check](#address-plan-check), not merely documented here.
 
+#### There is no IPAM here, and that is a decision
+
+It is worth being precise about what the address plan is, because "we have an address plan"
+and "we have IPAM" are not the same claim.
+
+What exists is **allocation by hand, validated by machine**. A range is chosen by a human,
+written into `infra/main.bicepparam`, described in the tables above, and then checked on every
+pull request by [the address plan check](#address-plan-check). That catches the failure modes
+that actually bite — an overlap, a subnet outside its own virtual network, a malformed CIDR —
+before Azure does, and it catches them in seconds rather than halfway through a deployment.
+
+What does **not** exist is an allocation authority. Nothing hands out the next free `/20`,
+nothing records utilisation, and nothing knows about address space outside this repository.
+The tables above are prose, maintained by hand; the check enforces that they do not contradict
+the parameters, but it cannot keep them in sync.
+
+For a lab with one hub and three spokes that trade-off is correct. A validator is free, has no
+runtime footprint, and cannot itself fail in a way that breaks the network. The point at which
+it stops being correct is reasonably sharp: address space consumed outside this repository, or
+enough spokes that picking the next range stops being obvious.
+
+The replacement, when that happens, is **Azure Virtual Network Manager IPAM**, which is
+generally available and deployable from Bicep —
+`Microsoft.Network/networkManagers`, `.../ipamPools`, and `.../ipamPools/staticCidrs`. The
+shape would follow the plan already in use:
+
+| Pool | Range | Allocates |
+|---|---|---|
+| Root | `10.0.0.0/8` | the whole lab |
+| Hubs | `10.0.0.0/16` | one `/19` per hub |
+| Spokes, Central US | `10.1.0.0/16` | one `/20` per spoke |
+| Spokes, West US 3 | `10.2.0.0/16` | one `/20` per spoke |
+
+Existing virtual networks would be associated with their pool as static CIDRs first, so the
+pool reflects reality before it starts allocating; a virtual network can then take
+`ipamPoolPrefixAllocations` instead of a literal `addressPrefixes`. The address plan check
+would stay regardless — it validates subnet structure inside a virtual network, which IPAM
+association alone does not.
+
+Two things to settle before adopting it. IPAM bills **per active IP address in an associated
+virtual network, per hour** — not per address in the pool, so a `/8` root pool is not itself
+expensive, but the expected active-IP count is worth pricing first. And virtual network-based
+Virtual Network Manager charges apply separately once a configuration is deployed to a virtual
+network.
+
 ### Orphans after a removal
 
 ARM incremental mode **does not delete**. Anything removed from a template stays in Azure
