@@ -24,6 +24,7 @@ Subscription-scope Bicep root for the hub-and-spoke network.
 |---|---|
 | `br/public:avm/res/resources/resource-group` | `0.4.4` |
 | `br/public:avm/ptn/network/private-link-private-dns-zones` | `0.7.3` |
+| `br/public:avm/res/network/private-dns-zone` | `0.8.1` |
 | `br/public:avm/res/network/virtual-network` | `0.9.0` |
 | `br/public:avm/res/network/network-security-group` | `0.5.3` |
 | `br/public:avm/res/network/bastion-host` | `0.8.2` |
@@ -55,6 +56,7 @@ composed from AVM resource modules instead.
 | `spokes` | No | `spokeType[]`. One entry per spoke. Each gets a resource group, VNet, subnets, a peering to its hub, and links to every zone. |
 | `virtualNetworkLinks` | No | Extra VNets to link, beyond the hubs, which are linked automatically. |
 | `additionalPrivateLinkPrivateDnsZonesToInclude` | No | Extra zones beyond the curated catalog. |
+| `customPrivateDnsZones` | No | `string[]`. Non-Private-Link zones, such as an owned domain. Created in the DNS resource group and linked to every hub and spoke. |
 | `platform` | No | `platformType`. Shared Log Analytics, Key Vault, container registry and the runner identity, landing in the spoke named by `spokeName`. |
 | `containerAppsEnvironment` | No | `containerAppsEnvironmentType`. Runner environment in the subnet named by `subnetName` of the spoke named by `spokeName`. |
 | `githubApp` | No | `githubAppType`. The App the runners authenticate as. Required when `githubRunners` is non-empty. |
@@ -813,6 +815,31 @@ explicitly so the zones deployed are a reviewed decision rather than a module de
 - **Cosmos DB for PostgreSQL** (`privatelink.postgres.cosmos.azure.com`) is deliberately
   excluded. It is a different service from PostgreSQL flexible server.
 - Autoregistration is never enabled on these zones. Private endpoints own the records.
+
+### Custom zones
+
+`customPrivateDnsZones` holds zones that are **not** Private Link zones — an organisation's
+own domain, used for private name resolution inside the estate. They are deployed with
+`avm/res/network/private-dns-zone` rather than the pattern module, into the same DNS resource
+group, and linked to exactly the same set of virtual networks as the catalog, so a record
+added once resolves from every hub and spoke.
+
+The pattern module is deliberately not used for these: its name list is reviewed against the
+Microsoft Private Link DNS page and it resolves `{regionName}`/`{regionCode}` tokens, neither
+of which applies to a vanity domain. Keep `privatelink.*` names out of `customPrivateDnsZones`
+and in `zones.bicep` instead.
+
+Current entries:
+
+| Zone | Purpose |
+|---|---|
+| `christopher-house.com` | Organisation domain, for private records pointing at workloads in the estate. |
+
+Registration is off here too. These zones hold reviewed records, not machine names
+auto-registered by whatever virtual machine happens to boot in a spoke. **This template
+creates the zone and its links only; it does not manage records inside it.** A record added
+here overrides public resolution of that name for every linked virtual network, so adding the
+apex or a widely used hostname will black-hole it internally unless a record is also present.
 
 ### Coverage for the Foundry lab's bring-your-own dependencies
 

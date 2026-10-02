@@ -498,6 +498,13 @@ param additionalPrivateLinkPrivateDnsZonesToInclude = [
   'privatelink.westus3.azurecontainerapps.io'
 ]
 
+// Organisation-owned zones that are not Private Link zones. They are created in the shared
+// DNS resource group and linked to every hub and spoke, so a record added once resolves
+// estate-wide. Records themselves are not managed here.
+param customPrivateDnsZones = [
+  'christopher-house.com'
+]
+
 param tags = {
   workload: 'connectivity'
   'managed-by': 'bicep'
