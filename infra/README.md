@@ -162,6 +162,20 @@ hosts the self-hosted runners — see [Self-hosted runners](#self-hosted-github-
 | `snet-runners` | `10.2.0.0/26` | Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
 | *(free)* | `10.2.0.64` – `10.2.15.255` | |
 
+Spoke 4, `spoke-foundry-cus`, is `10.1.32.0/22` (10.1.32.0 – 10.1.35.255). It holds the
+privately networked Azure AI Foundry lab — see [Foundry lab spoke](#foundry-lab-spoke). It is
+the only spoke that does not declare a full `/20`: the `10.1.32.0/20` slot is reserved for it,
+so the next Central US spoke starts at `10.1.48.0/20`.
+
+| Subnet | Prefix | Notes |
+|---|---|---|
+| `snet-foundry-agents` | `10.1.32.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
+| `snet-privateendpoints` | `10.1.34.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
+| `snet-apim` | `10.1.34.32/27` | Delegated to `Microsoft.Web/serverFarms` for the API Management v2 tiers. Dedicated — APIM cannot share a subnet. |
+| *(free)* | `10.1.34.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
+| *(free)* | `10.1.34.128` – `10.1.35.255` | |
+| *(reserved)* | `10.1.36.0` – `10.1.47.255` | Rest of the spoke's `/20` slot. |
+
 Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges must
 not overlap — an invariant enforced on every pull request by
 [the address plan check](#address-plan-check), not merely documented here.
@@ -527,6 +541,42 @@ Bicep's `assert` is still experimental, so the invariant is documented rather th
 
 Spoke subnets are a generic list, not named roles like the hub's. A spoke is a workload
 landing zone, so its subnets are not knowable in advance.
+
+### Foundry lab spoke
+
+`spoke-foundry-cus` is the landing zone for a privately networked Azure AI Foundry lab. The
+spoke itself is network only — no Foundry account, API Management instance or private endpoint
+is deployed by this repository yet. What it establishes is the address space and the three
+subnets those resources require, with the constraints that cannot be changed afterwards
+already settled.
+
+- **`snet-foundry-agents` is delegated to `Microsoft.App/environments`.** Foundry Agent Service
+  network injection runs the agents on the Container Apps platform, and Azure requires that
+  delegation and a /27 or larger subnet before it will accept the injection. The subnet is
+  dedicated to the injected Foundry account.
+- **It is a /23, well past the documented minimum, on purpose.** The same rule that applies to
+  a Container Apps environment applies here: the subnet cannot be resized once something is
+  injected into it, so growing later means rebuilding the account.
+- **`snet-apim` is a /27, not a /28.** `/27` is the documented minimum for API Management
+  virtual network injection and integration alike, and Azure rejects anything smaller at
+  preflight — not at `az bicep build`. `/24` is the recommendation for an instance expected to
+  scale out; `/27` is sized for a single-unit lab instance. The subnet is dedicated: a
+  virtual network-joined API Management instance cannot share its subnet with anything else.
+- **`snet-apim` is delegated to `Microsoft.Web/serverFarms`**, which the v2 tiers — Basic v2,
+  Standard v2 and Premium v2 — require for both outbound integration and full injection. The
+  classic Premium tier instead wants an undelegated subnet plus a large mandatory NSG rule
+  set, and costs roughly an order of magnitude more. Moving between the two means recreating
+  the subnet, so the tier is effectively chosen here rather than at API Management deployment
+  time.
+- **`snet-privateendpoints` carries the Foundry dependencies.** A Foundry deployment does not
+  auto-create private endpoints for Azure AI Search, Storage or Cosmos DB even when it brings
+  its own; those are explicit. `privatelink.azure-api.net` was added to the zone catalog for
+  the API Management private endpoint; the AI, Search, Storage and Cosmos zones were already
+  there.
+- **No route table.** Unlike `spoke-runners-wu3`, this spoke egresses directly rather than
+  through the hub firewall. Add routes to the subnets if the lab needs a single auditable
+  egress address, keeping in mind that Foundry injection inherits the Container Apps rule that
+  only a workload profile environment honours a user-defined route.
 
 ### Peering
 

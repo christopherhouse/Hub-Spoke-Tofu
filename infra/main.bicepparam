@@ -254,6 +254,73 @@ param spokes = [
       }
     ]
   }
+  // The privately networked Azure AI Foundry lab: a Foundry resource with network injection
+  // for the Agent Service, its dependency private endpoints, and API Management in front of
+  // the model endpoints.
+  //
+  // Spoke 4 takes the next /20 slot, 10.1.32.0/20, but only declares a /22 of it. The slot is
+  // reserved so the next spoke starts at 10.1.48.0/20 and the lab can grow into 10.1.36.0 -
+  // 10.1.47.255 without renumbering.
+  //
+  // Spoke 4 is 10.1.32.0/22 (10.1.32.0 - 10.1.35.255):
+  //   10.1.32.0/23    snet-foundry-agents
+  //   10.1.34.0/27    snet-privateendpoints
+  //   10.1.34.32/27   snet-apim
+  //   10.1.34.64/26   free, earmarked for an Application Gateway if public ingress is added
+  //   10.1.34.128 - 10.1.35.255   free
+  {
+    name: 'spoke-foundry-cus'
+    hubName: 'hub-cus'
+    location: 'centralus'
+    resourceGroupName: 'RG-WORKLOAD-FOUNDRY-CUS'
+    addressPrefixes: [
+      '10.1.32.0/22'
+    ]
+    subnets: [
+      {
+        // Foundry Agent Service network injection. The agents run on managed compute that
+        // Azure places in this subnet, so it is dedicated to the Foundry account and hosts
+        // nothing else.
+        name: 'snet-foundry-agents'
+        addressPrefix: '10.1.32.0/23'
+        // Required by Foundry network injection, which runs the agents on the Container Apps
+        // platform. Documented minimum is /27; a /23 leaves room for the agent fleet to
+        // scale, and like a Container Apps environment subnet it cannot be resized once the
+        // injected account exists.
+        delegation: 'Microsoft.App/environments'
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+      }
+      {
+        // Private endpoints for the Foundry account and its bring-your-own dependencies:
+        // Azure AI Search, Storage and Cosmos DB. Those three are not auto-created by a
+        // Foundry deployment, so they land here explicitly.
+        name: 'snet-privateendpoints'
+        addressPrefix: '10.1.34.0/27'
+        allowBastionAccess: false
+        privateEndpointNetworkPolicies: 'Disabled'
+      }
+      {
+        // API Management, dedicated: a virtual network-joined instance cannot share its
+        // subnet with any other resource.
+        //
+        // /27, not the /28 first considered: /27 is the documented minimum for virtual
+        // network injection and integration alike, and Azure rejects anything smaller at
+        // preflight. /24 is the recommendation for a production instance that scales out;
+        // /27 is sized for a single-unit lab instance.
+        name: 'snet-apim'
+        addressPrefix: '10.1.34.32/27'
+        // The v2 tiers - Basic v2, Standard v2 and Premium v2 - require this delegation for
+        // both outbound integration and full injection. The classic Premium tier uses an
+        // undelegated subnet plus a large mandatory NSG rule set instead; it is roughly an
+        // order of magnitude more expensive and is not what this lab is sized for. Switching
+        // tiers later means recreating this subnet.
+        delegation: 'Microsoft.Web/serverFarms'
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+      }
+    ]
+  }
 ]
 
 // Shared platform services. `spokeName` supplies the subscription, resource group and region,

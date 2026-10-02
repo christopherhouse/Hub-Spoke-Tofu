@@ -70,4 +70,10 @@ var curatedPrivateLinkPrivateDnsZones = [
 
   // Service Bus. Also covers Event Hubs and Relay.
   'privatelink.servicebus.windows.net'
+
+  // API Management. One zone covers every endpoint a private endpoint exposes - gateway,
+  // portal, management and SCM - as separate records inside it, so no per-endpoint zone is
+  // needed. The classic Premium tier's internal virtual network mode uses azure-api.net
+  // records in a zone of its own name rather than this privatelink zone.
+  'privatelink.azure-api.net'
 ]
