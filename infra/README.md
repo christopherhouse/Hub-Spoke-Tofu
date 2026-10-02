@@ -806,6 +806,54 @@ explicitly so the zones deployed are a reviewed decision rather than a module de
   excluded. It is a different service from PostgreSQL flexible server.
 - Autoregistration is never enabled on these zones. Private endpoints own the records.
 
+### Coverage for the Foundry lab's bring-your-own dependencies
+
+Foundry Agent Service in its standard setup does not create private endpoints for the
+resources it depends on, even when you supply your own. Those are explicit, and they land in
+`snet-privateendpoints` in `spoke-foundry-cus`. The catalog already covers every one of them
+except Application Insights, which stays public by decision:
+
+| Dependency | Private endpoint group ID | Zone | In catalog |
+|---|---|---|---|
+| Foundry account | `account` | `privatelink.services.ai.azure.com`, `privatelink.openai.azure.com`, `privatelink.cognitiveservices.azure.com` | yes |
+| Cosmos DB (NoSQL) | `Sql` | `privatelink.documents.azure.com` | yes |
+| Storage | `blob`, and `file`/`queue`/`table` if used | `privatelink.blob.core.windows.net` and friends | yes |
+| AI Search | `searchService` | `privatelink.search.windows.net` | yes |
+| Key Vault | `vault` | `privatelink.vaultcore.azure.net` | yes |
+| Container Registry | `registry` | `privatelink.azurecr.io` | yes |
+| Agent injection subnet | n/a | `privatelink.centralus.azurecontainerapps.io` | yes |
+| **Application Insights** | **none exists** | `privatelink.monitor.azure.com`, `privatelink.oms.opinsights.azure.com`, `privatelink.ods.opinsights.azure.com`, `privatelink.agentsvc.azure-automation.net` | **no — public by decision** |
+
+Deploy all three AI endpoint zones' records or only the ones whose data plane the workload
+calls; the zones themselves are already there either way.
+
+#### Application Insights is deliberately not private
+
+Application Insights has **no per-component private endpoint**. The only way to reach it
+privately is an **Azure Monitor Private Link Scope**, and this repository does not deploy one
+— see [Why the workspace is public](#why-the-workspace-is-public). The Foundry lab follows the
+same posture as the rest of the estate: telemetry goes to a public ingestion endpoint that
+still requires Entra authentication.
+
+The four Azure Monitor zones are therefore absent on purpose, and adding them alone would be
+actively harmful. This repository links **one central zone catalog to every hub and spoke
+virtual network**, so those zones would override Azure Monitor name resolution estate-wide
+with no private endpoint records behind them.
+
+Two Azure constraints are why this can never be a quiet per-spoke change if it is ever
+revisited:
+
+- **A virtual network can connect to only one AMPLS.** Microsoft's guidance for hub-and-spoke
+  is a single private link on the hub, not one per spoke.
+- **Networks that share a DNS share the consequences.** `Private Only` access mode blocks
+  traffic to any Azure Monitor resource outside the scope, across every network sharing those
+  zones, regardless of subscription. With one catalog linked everywhere, that is the whole
+  estate — including the runners' diagnostics and `log-platform-cus`.
+
+Revisiting it means one change that deploys an AMPLS in `hub-cus` covering `log-platform-cus`
+and every component, adds the four zones to the catalog, and starts in `Open` access mode. It
+is not a four-line catalog edit and must not be made as one.
+
 ## Shared platform services
 
 `main.bicepparam` defines a `platform` block that lands in an ordinary spoke —
