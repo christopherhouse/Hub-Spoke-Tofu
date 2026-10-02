@@ -50,6 +50,9 @@ param virtualNetworkLinks array = []
 @description('Optional. Additional Private Link DNS zones to create on top of the curated catalog. Use this for regional zones in regions other than the deployment location, or for services the catalog does not cover.')
 param additionalPrivateLinkPrivateDnsZonesToInclude string[] = []
 
+@description('Optional. Private DNS zones that are not Private Link zones, such as an organisation\'s own domain. Each is created in the shared DNS resource group and linked to every hub and spoke virtual network on the same terms as the curated catalog. Keep privatelink.* names out of this list; they belong in the catalog in zones.bicep.')
+param customPrivateDnsZones string[] = []
+
 @description('Optional. Tags applied to the resource group and every Private DNS zone.')
 param tags object?
 
@@ -261,6 +264,10 @@ var spokeVirtualNetworkLinks = [
   }
 ]
 
+// Shared by the curated Private Link catalog and the custom zones below so both are linked
+// to exactly the same set of virtual networks.
+var allVirtualNetworkLinks = concat(hubVirtualNetworkLinks, spokeVirtualNetworkLinks, virtualNetworkLinks)
+
 // Deployed into the resource group above. Cross-subscription placement for future hubs and
 // spokes uses resourceGroup(<subscriptionId>, <name>) here; no provider plumbing is needed.
 module privateDnsZones 'br/public:avm/ptn/network/private-link-private-dns-zones:0.7.3' = {
@@ -277,11 +284,35 @@ module privateDnsZones 'br/public:avm/ptn/network/private-link-private-dns-zones
     location: location
     privateLinkPrivateDnsZones: curatedPrivateLinkPrivateDnsZones
     additionalPrivateLinkPrivateDnsZonesToInclude: additionalPrivateLinkPrivateDnsZonesToInclude
-    virtualNetworkLinks: concat(hubVirtualNetworkLinks, spokeVirtualNetworkLinks, virtualNetworkLinks)
+    virtualNetworkLinks: allVirtualNetworkLinks
     tags: tags
     enableTelemetry: enableTelemetry
   }
 }
+
+// Zones that are not Private Link zones. The pattern module above is specific to the
+// privatelink.* catalog - it resolves region tokens and its name list is reviewed against the
+// Microsoft Private Link DNS page - so an organisation-owned domain is deployed with the
+// resource module instead, in the same resource group and with the same virtual network
+// links. Registration stays off: these zones hold reviewed records, not machine names
+// auto-registered by whatever virtual machine happens to boot in a spoke.
+module customDnsZones 'br/public:avm/res/network/private-dns-zone:0.8.1' = [
+  for zone in customPrivateDnsZones: {
+    name: 'deploy-dns-zone-${replace(zone, '.', '-')}'
+    scope: resourceGroup(defaultSubscriptionId, dnsResourceGroupName)
+    dependsOn: [
+      dnsResourceGroup
+      hubNetworks
+      spokeNetworks
+    ]
+    params: {
+      name: zone
+      virtualNetworkLinks: allVirtualNetworkLinks
+      tags: tags
+      enableTelemetry: enableTelemetry
+    }
+  }
+]
 
 // ---------------------------------------------------------------------------------------
 // Key Vault, container registry and the runner identity
@@ -440,6 +471,14 @@ output dnsResourceGroupName string = dnsResourceGroup.outputs.name
 
 @description('The Private DNS zones that were deployed, with region tokens resolved and virtual network links applied.')
 output privateDnsZones array = privateDnsZones.outputs.combinedPrivateLinkPrivateDnsZonesReplacedWithVnetsToLink
+
+@description('The custom, non-Private-Link DNS zones that were deployed, each linked to every hub and spoke virtual network.')
+output customPrivateDnsZones array = [
+  for (zone, index) in customPrivateDnsZones: {
+    name: zone
+    resourceId: customDnsZones[index].outputs.resourceId
+  }
+]
 
 @description('The hubs that were deployed, with the resource IDs a spoke or a Container Apps environment needs to attach to one.')
 output hubs array = [
