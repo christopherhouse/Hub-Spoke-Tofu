@@ -173,7 +173,7 @@ holds the privately networked Azure AI Foundry lab — see
 
 | Subnet | Prefix | Notes |
 |---|---|---|
-| `snet-foundry-agents` | `10.2.16.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. |
+| `snet-foundry-agents` | `10.2.16.0/23` | Delegated to `Microsoft.App/environments` for Foundry Agent Service network injection. Cannot be resized once injected. Not force-tunnelled; one route sends `10.1.16.0/24` to the hub firewall for registry pulls. |
 | `snet-privateendpoints` | `10.2.18.0/27` | Foundry account plus its bring-your-own Search, Storage and Cosmos DB endpoints. |
 | `snet-apim` | `10.2.18.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Mandatory NSG rule set, four service endpoints, and a route table that force-tunnels everything except the `ApiManagement` service tag. |
 | *(free)* | `10.2.18.48/28` | |
@@ -678,6 +678,16 @@ West US 3 too.
   break the agents as to route them, so it is left on the system routes. Revisit if Foundry
   documents forced-tunnelling support.
 
+  The one exception is a narrow route: `10.1.16.0/24`, the platform spoke's private endpoint
+  subnet, goes to the hub firewall. Hosted agents pull their images from the platform registry,
+  whose private endpoint is at `10.1.16.5` (regional data endpoint) and `10.1.16.6` (login
+  server). This spoke is not peered to `spoke-platform-cus`, so without the route Azure's system
+  route for `10.0.0.0/8` drops the pull. The firewall's `allow-foundry-agents-to-platform-registry`
+  network rule then admits `10.2.16.0/23` to those two addresses on TCP 443, and always-SNAT
+  carries the reply back. It is a network rule, not an application rule, because this subnet
+  is not in the permissive web rule. The addresses are the endpoint's current NIC IPs; if the
+  endpoint is recreated, re-read them and update the rule.
+
 ### Peering
 
 The AVM virtual network module creates **both** directions when `remotePeeringEnabled` is set,
@@ -972,6 +982,13 @@ Verify with:
 az resource show --ids <registry resource ID> --api-version 2025-04-01 `
   --query "properties.networkRuleBypassAllowedForTasks"
 ```
+
+### ARM-audience tokens
+
+`azureADAuthenticationAsArmPolicy` is `enabled`, so the registry accepts Entra tokens issued
+for the Azure Resource Manager audience as well as the ACR audience. Admin user and anonymous
+pull stay off, so this widens which token audiences are accepted, not who is authorized. RBAC
+still decides every pull and push.
 
 ### Why exports are not disabled
 

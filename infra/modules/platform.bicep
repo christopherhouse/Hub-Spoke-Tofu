@@ -202,6 +202,9 @@ module registry 'br/public:avm/res/container-registry/registry:0.13.1' = if (con
     retentionPolicyStatus: 'enabled'
     retentionPolicyDays: containerRegistry!.?untaggedManifestRetentionDays ?? 7
     softDeletePolicyStatus: 'disabled'
+    // Accept Entra tokens issued for the ARM audience as well as the ACR audience, so callers
+    // that hold only an ARM token can authenticate to the registry data plane.
+    azureADAuthenticationAsArmPolicyStatus: 'enabled'
     // Export policy stays enabled, which is not a free choice: Azure rejects
     // `exportPolicyStatus: 'disabled'` with DisableExport_PublicNetworkAccessMustBeDisabled
     // unless public network access is also Disabled. Since ACR Tasks needs that public endpoint
