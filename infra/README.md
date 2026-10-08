@@ -973,6 +973,13 @@ az resource show --ids <registry resource ID> --api-version 2025-04-01 `
   --query "properties.networkRuleBypassAllowedForTasks"
 ```
 
+### ARM-audience tokens
+
+`azureADAuthenticationAsArmPolicy` is `enabled`, so the registry accepts Entra tokens issued
+for the Azure Resource Manager audience as well as the ACR audience. Admin user and anonymous
+pull stay off, so this widens which token audiences are accepted, not who is authorized. RBAC
+still decides every pull and push.
+
 ### Why exports are not disabled
 
 `exportPolicyStatus` stays `enabled`. Azure rejects disabling it with
