@@ -161,6 +161,29 @@ param hubs = [
             '1886'
           ]
         }
+        // Foundry hosted agents pull their container images from the platform registry. The
+        // agents run in snet-foundry-agents and the registry's private endpoint is in
+        // spoke-platform-cus: 10.1.16.5 is the regional data endpoint, 10.1.16.6 the login
+        // server. The two spokes are not peered, so the pull transits this firewall via the
+        // snet-foundry-agents route. A network rule, not an application rule, because the
+        // agents subnet is not force-tunnelled and the permissive web rule does not cover it.
+        // Always-SNAT still applies, so the endpoint replies to the firewall.
+        //
+        // These are the endpoint's current NIC addresses. If the private endpoint is ever
+        // recreated, check them with `az network nic show` and update this rule.
+        {
+          name: 'allow-foundry-agents-to-platform-registry'
+          sourceAddresses: [
+            '10.2.16.0/23'
+          ]
+          destinationAddresses: [
+            '10.1.16.5'
+            '10.1.16.6'
+          ]
+          destinationPorts: [
+            '443'
+          ]
+        }
       ]
     }
     // Management jump boxes. No public IP; Bastion is the only way in, and the jump box
@@ -325,6 +348,18 @@ param spokes = [
         delegation: 'Microsoft.App/environments'
         // Hosts no virtual machines.
         allowBastionAccess: false
+        // Not force-tunnelled; see infra/README.md. This one route sends only the platform
+        // spoke's private endpoint subnet to the hub firewall, so hosted agents can pull images
+        // from the platform registry. Without it the system route for 10.0.0.0/8 drops the
+        // traffic, because this spoke is not peered to spoke-platform-cus. Everything else
+        // stays on the system routes.
+        routes: [
+          {
+            name: 'platform-privateendpoints-to-firewall'
+            addressPrefix: '10.1.16.0/24'
+            nextHopType: 'HubFirewall'
+          }
+        ]
       }
       {
         // Private endpoints for the Foundry account and its bring-your-own dependencies:
