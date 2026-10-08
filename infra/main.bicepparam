@@ -100,6 +100,7 @@ param hubs = [
             '10.0.0.0/19'
             '10.2.0.0/20'
             '10.2.18.32/28'
+            '10.2.18.128/26'
           ]
           targetFqdns: [
             '*'
@@ -124,6 +125,7 @@ param hubs = [
           name: 'allow-container-apps-service-tags'
           sourceAddresses: [
             '10.2.0.0/20'
+            '10.2.18.128/26'
           ]
           destinationAddresses: [
             'MicrosoftContainerRegistry'
@@ -320,7 +322,8 @@ param spokes = [
   //   10.2.18.32/28   snet-apim
   //   10.2.18.48/28   free
   //   10.2.18.64/26   free, earmarked for an Application Gateway if public ingress is added
-  //   10.2.18.128 - 10.2.19.255   free
+  //   10.2.18.128/26  snet-runners
+  //   10.2.18.192 - 10.2.19.255   free
   {
     name: 'spoke-foundry-wu3'
     hubName: 'hub-cus'
@@ -430,6 +433,35 @@ param spokes = [
             addressPrefix: 'ApiManagement'
             nextHopType: 'Internet'
           }
+          {
+            name: 'default-to-firewall'
+            addressPrefix: '0.0.0.0/0'
+            nextHopType: 'HubFirewall'
+          }
+        ]
+      }
+      {
+        // The Foundry lab's own self-hosted runners: an Azure Container Apps workload profile
+        // environment owned by christopherhouse/Foundry-Private-Lab, which runs event-driven
+        // jobs that register as ephemeral GitHub Actions runners for that repository only.
+        // They live here rather than in spoke-runners-wu3 so agent image pushes and Foundry
+        // data-plane calls reach the lab's private endpoints inside the same virtual network,
+        // without a firewall hop.
+        //
+        // Same shape as spoke-runners-wu3/snet-runners: /26 because the prefix cannot change
+        // once an environment exists, the Container Apps NSG rule set, and a default route to
+        // the hub firewall. The firewall rules above list this prefix as a source so the
+        // runners reach GitHub, the platform registry and the platform vault.
+        name: 'snet-runners'
+        addressPrefix: '10.2.18.128/26'
+        // Mandatory for a workload profile environment.
+        delegation: 'Microsoft.App/environments'
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+        securityRules: runnerSecurityRules('10.2.18.128/26')
+        // Only a workload profile environment honours a route table; the lab's environment
+        // keeps its Consumption workload profile for that reason.
+        routes: [
           {
             name: 'default-to-firewall'
             addressPrefix: '0.0.0.0/0'

@@ -178,7 +178,8 @@ holds the privately networked Azure AI Foundry lab — see
 | `snet-apim` | `10.2.18.32/28` | Undelegated — classic Developer/Premium injection requires no delegation. Mandatory NSG rule set, four service endpoints, and a route table that force-tunnels everything except the `ApiManagement` service tag. |
 | *(free)* | `10.2.18.48/28` | |
 | *(free)* | `10.2.18.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
-| *(free)* | `10.2.18.128` – `10.2.19.255` | |
+| `snet-runners` | `10.2.18.128/26` | Self-hosted runners for `Foundry-Private-Lab`, whose Container Apps environment lives in that repository. Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
+| *(free)* | `10.2.18.192` – `10.2.19.255` | |
 | *(reserved)* | `10.2.20.0` – `10.2.31.255` | Rest of the spoke's `/20` slot. |
 
 Subsequent hubs take the next /19 and subsequent spokes the next /20. Hub and spoke ranges must
@@ -687,6 +688,15 @@ West US 3 too.
   carries the reply back. It is a network rule, not an application rule, because this subnet
   is not in the permissive web rule. The addresses are the endpoint's current NIC IPs; if the
   endpoint is recreated, re-read them and update the rule.
+
+- **`snet-runners` is force-tunnelled, like the runners spoke.** It hosts the Foundry lab's own
+  self-hosted runner environment, which `Foundry-Private-Lab` deploys and owns; this repository
+  provides only the subnet. Runners there push agent images and call the Foundry data plane, so
+  they sit next to the lab's private endpoints rather than in `spoke-runners-wu3`. The subnet
+  uses `runnerSecurityRules('10.2.18.128/26')` and a `0.0.0.0/0` route to the hub firewall, and
+  `10.2.18.128/26` is a source in both `allow-web-outbound` and
+  `allow-container-apps-service-tags`, which is how it reaches GitHub, the platform registry and
+  the platform vault.
 
 ### Peering
 
