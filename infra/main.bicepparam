@@ -101,6 +101,7 @@ param hubs = [
             '10.2.0.0/20'
             '10.2.18.32/28'
             '10.2.18.128/26'
+            '10.2.18.192/26'
           ]
           targetFqdns: [
             '*'
@@ -126,6 +127,7 @@ param hubs = [
           sourceAddresses: [
             '10.2.0.0/20'
             '10.2.18.128/26'
+            '10.2.18.192/26'
           ]
           destinationAddresses: [
             'MicrosoftContainerRegistry'
@@ -323,7 +325,8 @@ param spokes = [
   //   10.2.18.48/28   free
   //   10.2.18.64/26   free, earmarked for an Application Gateway if public ingress is added
   //   10.2.18.128/26  snet-runners
-  //   10.2.18.192 - 10.2.19.255   free
+  //   10.2.18.192/26  snet-apps
+  //   10.2.19.0 - 10.2.19.255   free
   {
     name: 'spoke-foundry-wu3'
     hubName: 'hub-cus'
@@ -469,6 +472,36 @@ param spokes = [
           }
         ]
       }
+      {
+        // A second, internal Azure Container Apps workload profile environment owned by
+        // christopherhouse/Foundry-Private-Lab, hosting the Lab Posture Auditor: an MCP
+        // server and the agent that calls it. It is deliberately not the runners'
+        // environment - a subnet holds exactly one environment, and application workloads
+        // must not share a trust boundary with the runners that build and deploy them.
+        //
+        // Same shape as snet-runners: /26 because the prefix cannot change once an
+        // environment exists, the Container Apps NSG rule set, and a default route to the hub
+        // firewall. The rule set is reused as is; only its descriptions mention runners.
+        // Callers in other subnets (the agent runtime, the in-VNet verification job) reach the
+        // internal load balancer under the default AllowVnetInBound rule, so no inbound rule
+        // is added. The firewall rules above list this prefix as a source so the workloads
+        // reach Entra ID, Azure Resource Manager and Application Insights.
+        name: 'snet-apps'
+        addressPrefix: '10.2.18.192/26'
+        // Mandatory for a workload profile environment.
+        delegation: 'Microsoft.App/environments'
+        // Hosts no virtual machines.
+        allowBastionAccess: false
+        securityRules: runnerSecurityRules('10.2.18.192/26')
+        // Only a workload profile environment honours a route table.
+        routes: [
+          {
+            name: 'default-to-firewall'
+            addressPrefix: '0.0.0.0/0'
+            nextHopType: 'HubFirewall'
+          }
+        ]
+      }
     ]
   }
 ]
@@ -570,6 +603,13 @@ param additionalPrivateLinkPrivateDnsZonesToInclude = [
 // estate-wide. Records themselves are not managed here.
 param customPrivateDnsZones = [
   'christopher-house.com'
+  // Regional parent zone for internal Azure Container Apps environments in West US 3. An
+  // internal environment's default domain is <unique>.westus3.azurecontainerapps.io and the
+  // <unique> label is only known after the environment exists, so this zone cannot be named
+  // for one environment up front. The owning workload adds `*.<unique>` and `<unique>`
+  // A records pointing at the environment's static IP. See "Container Apps default-domain
+  // zone" in infra/README.md for the blast radius.
+  'westus3.azurecontainerapps.io'
 ]
 
 param tags = {
