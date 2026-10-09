@@ -33,7 +33,7 @@ env:
 jobs:
   validate:
     name: Build and what-if
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -75,7 +75,7 @@ jobs:
     name: Deploy
     needs: validate
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # The repository has a single environment; there is no dev/test/prod split. It carries no
     # required reviewers, so a merge to main deploys.
     environment: azure
