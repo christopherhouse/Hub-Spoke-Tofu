@@ -47,7 +47,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Base tooling
 #
 # curl, jq and openssl are the GitHub App JWT exchange in the entrypoint. git and git-lfs are
-# actions/checkout. python3 runs this repository's own scripts. The runner's remaining native
+# actions/checkout. python3 runs this repository's own scripts. skopeo pushes image tarballs to
+# the private registry without a Docker daemon. The runner's remaining native
 # dependencies are left to ./bin/installdependencies.sh below rather than listed here, because
 # their package names carry ABI version suffixes that change on every base image bump.
 # ---------------------------------------------------------------------------------------
@@ -66,6 +67,7 @@ RUN apt-get update \
         python3-venv \
         rsync \
         shellcheck \
+        skopeo \
         sudo \
         tar \
         unzip \
