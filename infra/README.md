@@ -179,7 +179,7 @@ holds the privately networked Azure AI Foundry lab — see
 | *(free)* | `10.2.18.48/28` | |
 | *(free)* | `10.2.18.64/26` | Earmarked for an Application Gateway if public ingress is ever put in front of APIM. |
 | `snet-runners` | `10.2.18.128/26` | Self-hosted runners for `Foundry-Private-Lab`, whose Container Apps environment lives in that repository. Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
-| `snet-apps` | `10.2.18.192/26` | The Foundry lab's application workloads (Lab Posture Auditor MCP server and agent), in a second, internal Container Apps environment owned by `Foundry-Private-Lab`. Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
+| `snet-apps` | `10.2.18.192/26` | The Foundry lab's application workloads (Lab Posture Auditor MCP server and agent), in a second Container Apps environment owned by `Foundry-Private-Lab`. Delegated to `Microsoft.App/environments`. Route table sends `0.0.0.0/0` to the hub firewall. |
 | *(free)* | `10.2.19.0` – `10.2.19.255` | |
 | *(reserved)* | `10.2.20.0` – `10.2.31.255` | Rest of the spoke's `/20` slot. |
 
@@ -705,9 +705,9 @@ West US 3 too.
   `runnerSecurityRules('10.2.18.192/26')` (only the rule descriptions mention runners) and the
   same `0.0.0.0/0` route. `10.2.18.192/26` is a source in `allow-web-outbound` and
   `allow-container-apps-service-tags`, which is how the workloads reach Entra ID, Azure Resource
-  Manager and Application Insights. No inbound rule is added: callers in other subnets reach an
-  internal environment's load balancer under the default `AllowVnetInBound` rule, and nothing in
-  the stack denies it.
+  Manager and Application Insights. No inbound rule is added: the environment takes ingress
+  through a private endpoint on `privatelink.westus3.azurecontainerapps.io`, not through a
+  load balancer in this subnet.
 
 ### Peering
 
@@ -865,7 +865,6 @@ Current entries:
 | Zone | Purpose |
 |---|---|
 | `christopher-house.com` | Organisation domain, for private records pointing at workloads in the estate. |
-| `westus3.azurecontainerapps.io` | Default domain of internal Container Apps environments in West US 3. Records are added by the owning workload. See below. |
 
 Registration is off here too. These zones hold reviewed records, not machine names
 auto-registered by whatever virtual machine happens to boot in a spoke. **This template
@@ -873,31 +872,16 @@ creates the zone and its links only; it does not manage records inside it.** A r
 here overrides public resolution of that name for every linked virtual network, so adding the
 apex or a widely used hostname will black-hole it internally unless a record is also present.
 
-### Container Apps default-domain zone
+Container Apps environments are not served from a custom zone here. A custom
+`westus3.azurecontainerapps.io` zone was added and then removed: it would make this estate
+authoritative for the whole namespace and return NXDOMAIN for every unrecorded name under it,
+including public Container Apps. Environments are reached through a private endpoint and the
+existing `privatelink.westus3.azurecontainerapps.io` zone instead.
 
-`westus3.azurecontainerapps.io` is a custom zone, not a Private Link zone, and it serves
-**internal, VNet-injected** Container Apps environments in West US 3. It is distinct from
-`privatelink.westus3.azurecontainerapps.io`, which serves environments reached through a
-private endpoint.
-
-An internal environment's default domain is `<unique>.westus3.azurecontainerapps.io`, and
-`<unique>` is assigned only when the environment is created, so a zone named for one
-environment cannot exist ahead of it. A regional parent zone can. The workload that owns an
-environment adds two A records to the zone, both pointing at the environment's static IP:
-`*.<unique>` and `<unique>`. This template creates the zone and its links only; the records
-belong to the workload deployment, using DNS-record-only permission on the zone.
-
-Blast radius, deliberately accepted for this lab:
-
-- The zone is linked to every hub and spoke, like all zones here. A name under
-  `westus3.azurecontainerapps.io` with no record in the zone returns NXDOMAIN to every linked
-  network, including names of public Container Apps in West US 3 that the estate might want to
-  reach. `NxDomainRedirect` fallback is not available: it applies to Private Link zones only.
-- The runners' environment in `spoke-runners-wu3` is internal and in West US 3 too. It runs
-  jobs with no ingress, so nothing needs its default domain to resolve. Add its records here
-  only if an app with ingress is ever hosted there.
-- If this becomes a problem, replace the regional zone with one zone per environment, named
-  for its exact default domain, once the environment exists.
+**Cleanup owed after the removal.** ARM incremental mode does not delete the zone created by
+the earlier deployment. Delete its virtual network links, then the zone, from the shared DNS
+resource group by hand (`az network private-dns link vnet delete`, then
+`az network private-dns zone delete`).
 
 ### Coverage for the Foundry lab's bring-your-own dependencies
 

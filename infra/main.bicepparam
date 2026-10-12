@@ -473,7 +473,7 @@ param spokes = [
         ]
       }
       {
-        // A second, internal Azure Container Apps workload profile environment owned by
+        // A second Azure Container Apps workload profile environment owned by
         // christopherhouse/Foundry-Private-Lab, hosting the Lab Posture Auditor: an MCP
         // server and the agent that calls it. It is deliberately not the runners'
         // environment - a subnet holds exactly one environment, and application workloads
@@ -482,10 +482,11 @@ param spokes = [
         // Same shape as snet-runners: /26 because the prefix cannot change once an
         // environment exists, the Container Apps NSG rule set, and a default route to the hub
         // firewall. The rule set is reused as is; only its descriptions mention runners.
-        // Callers in other subnets (the agent runtime, the in-VNet verification job) reach the
-        // internal load balancer under the default AllowVnetInBound rule, so no inbound rule
-        // is added. The firewall rules above list this prefix as a source so the workloads
-        // reach Entra ID, Azure Resource Manager and Application Insights.
+        // The subnet carries the environment's outbound traffic only. Ingress is a private
+        // endpoint on the environment, resolved through privatelink.westus3.azurecontainerapps.io
+        // above, so no inbound rule is added. The firewall rules above list this prefix as a
+        // source so the workloads reach Entra ID, Azure Resource Manager and Application
+        // Insights.
         name: 'snet-apps'
         addressPrefix: '10.2.18.192/26'
         // Mandatory for a workload profile environment.
@@ -603,13 +604,6 @@ param additionalPrivateLinkPrivateDnsZonesToInclude = [
 // estate-wide. Records themselves are not managed here.
 param customPrivateDnsZones = [
   'christopher-house.com'
-  // Regional parent zone for internal Azure Container Apps environments in West US 3. An
-  // internal environment's default domain is <unique>.westus3.azurecontainerapps.io and the
-  // <unique> label is only known after the environment exists, so this zone cannot be named
-  // for one environment up front. The owning workload adds `*.<unique>` and `<unique>`
-  // A records pointing at the environment's static IP. See "Container Apps default-domain
-  // zone" in infra/README.md for the blast radius.
-  'westus3.azurecontainerapps.io'
 ]
 
 param tags = {
