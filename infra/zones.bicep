@@ -71,6 +71,9 @@ var curatedPrivateLinkPrivateDnsZones = [
   // Service Bus. Also covers Event Hubs and Relay.
   'privatelink.servicebus.windows.net'
 
+  // Azure Web PubSub.
+  'privatelink.webpubsub.azure.com'
+
   // Azure Monitor is deliberately absent. Application Insights has no per-component private
   // endpoint; reaching it privately requires an Azure Monitor Private Link Scope, which this
   // repository has decided against. Adding privatelink.monitor.azure.com and its three

@@ -818,13 +818,19 @@ Policy in this tenant modifies it.
 
 ## Zone catalog
 
-`zones.bicep` exports `curatedPrivateLinkPrivateDnsZones`, 24 zones verified against the
+`zones.bicep` exports `curatedPrivateLinkPrivateDnsZones`, 25 zones verified against the
 Microsoft Learn *Azure Private Endpoint private DNS zone values* page. Public cloud only.
 
 Covered: storage (blob, file, queue, table, dfs, web), Key Vault, Azure SQL, PostgreSQL
 flexible server, MySQL flexible server, Cosmos DB (SQL, Mongo, Cassandra, Gremlin, Table),
 Azure Managed Redis, App Service, AI Foundry / Azure OpenAI / Cognitive Services, AI Search,
-Container Registry, Service Bus, and Container Apps.
+Container Registry, Service Bus, Web PubSub, and Container Apps.
+
+Web PubSub uses `privatelink.webpubsub.azure.com` for its `webpubsub` private endpoint
+subresource. Like every catalog zone, it is created in the shared DNS resource group
+and linked to every configured hub and spoke, including cross-subscription spokes,
+with registration disabled. The consuming Web PubSub deployment owns its private
+endpoint and DNS zone group; this catalog does not create a broker or endpoint records.
 
 The AVM pattern module ships a ~110-zone default catalog. We pass our curated list
 explicitly so the zones deployed are a reviewed decision rather than a module default.
